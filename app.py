@@ -96,7 +96,7 @@ def stations():
         """
 
         r = requests.get(
-            "https://overpass-api.de/api/interpreter",
+            https://lz4.overpass-api.de/api/interpreter,
             params={"data": query},
             timeout=30
         )
