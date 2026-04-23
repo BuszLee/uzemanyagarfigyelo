@@ -1,90 +1,89 @@
 from flask import Flask, jsonify, request
-import requests
+import math
 
 app = Flask(__name__)
 
+# ---------------------------------------------------
+# MINTA KUTAK (Magyarország)
+# ---------------------------------------------------
+stations_db = [
+    {"name": "MOL Budapest, Váci út", "brand": "MOL", "lat": 47.5310, "lon": 19.0670},
+    {"name": "Shell Budapest, Árpád híd", "brand": "Shell", "lat": 47.5325, "lon": 19.0450},
+    {"name": "OMV Budapest, Hungária körút", "brand": "OMV", "lat": 47.5050, "lon": 19.0950},
+    {"name": "MOL Budapest, Üllői út", "brand": "MOL", "lat": 47.4550, "lon": 19.1400},
+    {"name": "Shell Budapest, Budaörsi út", "brand": "Shell", "lat": 47.4700, "lon": 19.0200},
+    {"name": "OMV Budapest, Szentendrei út", "brand": "OMV", "lat": 47.5600, "lon": 19.0500},
+]
+
+# ---------------------------------------------------
+# TÁVOLSÁG
+# ---------------------------------------------------
+def calc_distance(lat1, lon1, lat2, lon2):
+    r = 6371
+
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return r * c
+
+
+# ---------------------------------------------------
+# ÁRAK
+# ---------------------------------------------------
+def get_price(brand):
+    prices = {
+        "MOL": 622,
+        "Shell": 639,
+        "OMV": 631
+    }
+    return prices.get(brand, 625)
+
+
+# ---------------------------------------------------
+# FŐ OLDAL
+# ---------------------------------------------------
 @app.route("/")
 def home():
-    return "Fuel API running"
+    return "Server működik"
 
+
+# ---------------------------------------------------
+# API
+# ---------------------------------------------------
 @app.route("/stations")
 def stations():
 
-    lat = request.args.get("lat", 47.4979, type=float)
-    lon = request.args.get("lon", 19.0402, type=float)
+    lat = float(request.args.get("lat", 47.4979))
+    lon = float(request.args.get("lon", 19.0402))
 
-    try:
-        query = f"""
-        [out:json];
-        (
-          node["amenity"="fuel"](around:5000,{lat},{lon});
-          way["amenity"="fuel"](around:5000,{lat},{lon});
-        );
-        out center;
-        """
+    result = []
 
-        r = requests.get(
-            "https://overpass-api.de/api/interpreter",
-            params={"data": query},
-            timeout=15
-        )
+    for s in stations_db:
 
-        data = r.json()
+        dist = calc_distance(lat, lon, s["lat"], s["lon"])
 
-        stations = []
+        result.append({
+            "name": s["name"],
+            "brand": s["brand"],
+            "fuelType": "95 Benzin",
+            "price": get_price(s["brand"]),
+            "lat": s["lat"],
+            "lon": s["lon"],
+            "distance": dist
+        })
 
-        for item in data["elements"]:
+    result.sort(key=lambda x: x["distance"])
 
-            tags = item.get("tags", {})
-            name = tags.get("name", "Benzinkút")
+    return jsonify({"stations": result[:20]})
 
-            if "lat" in item:
-                slat = item["lat"]
-                slon = item["lon"]
-            else:
-                slat = item["center"]["lat"]
-                slon = item["center"]["lon"]
-
-            stations.append({
-                "name": name,
-                "lat": slat,
-                "lon": slon,
-                "fuelType": "95",
-                "price": 615
-            })
-
-        if len(stations) > 0:
-            return jsonify({"stations": stations})
-
-    except:
-        pass
-
-    # tartalék rendszer
-    fallback = [
-        {
-            "name": "OMV közeli kút",
-            "lat": lat + 0.01,
-            "lon": lon + 0.01,
-            "fuelType": "95",
-            "price": 617
-        },
-        {
-            "name": "MOL közeli kút",
-            "lat": lat - 0.01,
-            "lon": lon,
-            "fuelType": "95",
-            "price": 612
-        },
-        {
-            "name": "Shell közeli kút",
-            "lat": lat,
-            "lon": lon - 0.01,
-            "fuelType": "95",
-            "price": 621
-        }
-    ]
-
-    return jsonify({"stations": fallback})
 
 if __name__ == "__main__":
     app.run()
