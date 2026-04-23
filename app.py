@@ -5,22 +5,23 @@ import math
 app = Flask(__name__)
 
 # ---------------------------------------------------
-# TÁVOLSÁG (km)
+# TÁVOLSÁG KM
 # ---------------------------------------------------
 def distance_km(lat1, lon1, lat2, lon2):
-    r = 6371
+    r = 6371.0
 
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
 
     a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
+        math.sin(dlat / 2) ** 2 +
+        math.cos(math.radians(lat1)) *
+        math.cos(math.radians(lat2)) *
+        math.sin(dlon / 2) ** 2
     )
 
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
     return r * c
 
 
@@ -47,7 +48,7 @@ def detect_brand(name):
 
 
 # ---------------------------------------------------
-# CÍM ÖSSZERAKÁS
+# CÍM
 # ---------------------------------------------------
 def build_address(tags):
     street = tags.get("addr:street", "")
@@ -55,14 +56,13 @@ def build_address(tags):
     city = tags.get("addr:city", "")
 
     line1 = f"{street} {house}".strip()
-    line2 = city.strip()
 
-    if line1 and line2:
-        return f"{line1}, {line2}"
+    if line1 and city:
+        return f"{line1}, {city}"
     elif line1:
         return line1
-    elif line2:
-        return line2
+    elif city:
+        return city
     else:
         return "Cím nem elérhető"
 
@@ -86,26 +86,26 @@ def stations():
         lon = float(request.args.get("lon", 19.0402))
 
         query = f"""
-        [out:json][timeout:25];
-        (
-          node["amenity"="fuel"](around:10000,{lat},{lon});
-          way["amenity"="fuel"](around:10000,{lat},{lon});
-          relation["amenity"="fuel"](around:10000,{lat},{lon});
-        );
-        out center tags;
-        """
+[out:json][timeout:25];
+(
+  node["amenity"="fuel"](around:10000,{lat},{lon});
+  way["amenity"="fuel"](around:10000,{lat},{lon});
+  relation["amenity"="fuel"](around:10000,{lat},{lon});
+);
+out center tags;
+"""
 
-        r = requests.get(
-            https://lz4.overpass-api.de/api/interpreter,
+        response = requests.get(
+            "https://lz4.overpass-api.de/api/interpreter",
             params={"data": query},
             timeout=30
         )
 
-        data = r.json()
+        data = response.json()
 
         result = []
 
-        for item in data["elements"]:
+        for item in data.get("elements", []):
 
             tags = item.get("tags", {})
 
@@ -150,4 +150,4 @@ def stations():
 
 
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=10000)
