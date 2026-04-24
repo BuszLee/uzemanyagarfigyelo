@@ -1,20 +1,23 @@
 from flask import Flask, jsonify, request
 import requests
 import math
+import re
+from datetime import datetime
 
 app = Flask(__name__)
 
 API_KEY = "fdfd01a4bf2748849f763d1efee731dd"
 
-# -----------------------------------------
-# Távolság km
-# -----------------------------------------
+# -------------------------------------------------
+# TÁVOLSÁG
+# -------------------------------------------------
 def distance_km(lat1, lon1, lat2, lon2):
-    return math.sqrt((lat1-lat2)**2 + (lon1-lon2)**2) * 111
+    return math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2) * 111
 
-# -----------------------------------------
-# Márka felismerés
-# -----------------------------------------
+
+# -------------------------------------------------
+# MÁRKA FELISMERÉS
+# -------------------------------------------------
 def detect_brand(name):
     n = name.lower()
 
@@ -26,23 +29,64 @@ def detect_brand(name):
         return "OMV"
     elif "lukoil" in n:
         return "Lukoil"
-    elif "orlen" in n:
-        return "Orlen"
-    elif "avia" in n:
-        return "Avia"
     else:
         return "Benzinkút"
 
-# -----------------------------------------
-# Főoldal
-# -----------------------------------------
+
+# -------------------------------------------------
+# VALÓDI HÍRFIGYELŐ RADAR
+# -------------------------------------------------
+def get_real_radar():
+
+    sources = [
+        "https://www.portfolio.hu",
+        "https://www.vg.hu",
+        "https://www.economx.hu"
+    ]
+
+    keywords = [
+        "üzemanyag",
+        "benzin",
+        "gázolaj",
+        "drágul",
+        "csökken",
+        "változik"
+    ]
+
+    try:
+        for url in sources:
+
+            r = requests.get(url, timeout=10)
+            text = r.text.lower()
+
+            if any(word in text for word in keywords):
+
+                # Ft keresés
+                match = re.search(r'(\d+)\s*ft', text)
+
+                if match:
+                    price = match.group(1)
+                    return f"⚠️ Friss hír: üzemanyagár változás várható ({price} Ft említve)"
+
+                return "⚠️ Friss hír jelent meg üzemanyagár témában."
+
+        return "✔️ Jelenleg nincs friss bejelentett árváltozás."
+
+    except:
+        return "⚠️ Radar átmenetileg nem elérhető."
+
+
+# -------------------------------------------------
+# KEZDŐOLDAL
+# -------------------------------------------------
 @app.route("/")
 def home():
-    return "Geoapify API működik"
+    return "Valós Radar API működik"
 
-# -----------------------------------------
-# Kutak
-# -----------------------------------------
+
+# -------------------------------------------------
+# KUTAK + RADAR
+# -------------------------------------------------
 @app.route("/stations")
 def stations():
 
@@ -65,52 +109,49 @@ def stations():
 
         for item in data["features"]:
 
-            props = item["properties"]
+            p = item["properties"]
 
-            name = props.get("name", "Benzinkút")
-            street = props.get("street", "")
-            housenumber = props.get("housenumber", "")
-            city = props.get("city", "")
+            name = p.get("name", "Benzinkút")
+            street = p.get("street", "")
+            number = p.get("housenumber", "")
 
             full_name = name
 
             if street:
                 full_name += ", " + street
 
-            if housenumber:
-                full_name += " " + housenumber
+            if number:
+                full_name += " " + number
 
-            if city:
-                full_name += ", " + city
-
-            item_lat = props["lat"]
-            item_lon = props["lon"]
+            item_lat = p["lat"]
+            item_lon = p["lon"]
 
             dist = distance_km(lat, lon, item_lat, item_lon)
 
-            brand = detect_brand(name)
-
             stations.append({
                 "name": full_name,
-                "brand": brand,
-                "fuelType": "95 Benzin",
+                "brand": detect_brand(name),
+                "fuelType": "Ismeretlen",
                 "price": 0,
                 "lat": item_lat,
                 "lon": item_lon,
-                "distance": dist
+                "distance": round(dist, 2)
             })
 
         stations.sort(key=lambda x: x["distance"])
 
         return jsonify({
+            "radar": get_real_radar(),
             "stations": stations
         })
 
     except Exception as e:
         return jsonify({
-            "error": str(e),
+            "radar": "⚠️ Nem elérhető a térképszerver.",
             "stations": []
         })
 
+
+# -------------------------------------------------
 if __name__ == "__main__":
     app.run()
