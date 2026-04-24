@@ -1,31 +1,20 @@
 from flask import Flask, jsonify, request
 import requests
 import math
-import json
-import os
 
 app = Flask(__name__)
 
-# -------------------------------------------------
-# Árak betöltése (ha van prices.json)
-# -------------------------------------------------
-def load_prices():
-    if os.path.exists("prices.json"):
-        with open("prices.json", "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+API_KEY = "fdfd01a4bf2748849f763d1efee731dd"
 
-prices = load_prices()
-
-# -------------------------------------------------
-# Távolság számítás km
-# -------------------------------------------------
+# -----------------------------------------
+# Távolság km
+# -----------------------------------------
 def distance_km(lat1, lon1, lat2, lon2):
-    return math.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2) * 111
+    return math.sqrt((lat1-lat2)**2 + (lon1-lon2)**2) * 111
 
-# -------------------------------------------------
+# -----------------------------------------
 # Márka felismerés
-# -------------------------------------------------
+# -----------------------------------------
 def detect_brand(name):
     n = name.lower()
 
@@ -44,106 +33,68 @@ def detect_brand(name):
     else:
         return "Benzinkút"
 
-# -------------------------------------------------
+# -----------------------------------------
 # Főoldal
-# -------------------------------------------------
+# -----------------------------------------
 @app.route("/")
 def home():
-    return "API működik"
+    return "Geoapify API működik"
 
-# -------------------------------------------------
-# Overpass lekérés több szerverrel
-# -------------------------------------------------
-def get_overpass_data(query):
-
-    urls = [
-        "https://overpass-api.de/api/interpreter",
-        "https://lz4.overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter"
-    ]
-
-    for url in urls:
-        try:
-            r = requests.post(url, data=query, timeout=20)
-
-            if r.status_code == 200:
-                return r.json()
-
-        except:
-            pass
-
-    return None
-
-# -------------------------------------------------
+# -----------------------------------------
 # Kutak
-# -------------------------------------------------
+# -----------------------------------------
 @app.route("/stations")
 def stations():
 
     lat = request.args.get("lat", default=47.4979, type=float)
     lon = request.args.get("lon", default=19.0402, type=float)
 
-    query = f"""
-    [out:json][timeout:25];
-    (
-      node["amenity"="fuel"](around:8000,{lat},{lon});
-      way["amenity"="fuel"](around:8000,{lat},{lon});
-      relation["amenity"="fuel"](around:8000,{lat},{lon});
-    );
-    out center tags;
-    """
+    url = (
+        f"https://api.geoapify.com/v2/places?"
+        f"categories=service.vehicle.fuel"
+        f"&filter=circle:{lon},{lat},5000"
+        f"&limit=20"
+        f"&apiKey={API_KEY}"
+    )
 
     try:
-        data = get_overpass_data(query)
-
-        if data is None:
-            return jsonify({
-                "error": "Nem elérhető térképszerver",
-                "stations": []
-            })
+        r = requests.get(url, timeout=20)
+        data = r.json()
 
         stations = []
 
-        for item in data["elements"]:
+        for item in data["features"]:
 
-            tags = item.get("tags", {})
+            props = item["properties"]
 
-            name = tags.get("name", "Benzinkút")
-            street = tags.get("addr:street", "")
-            number = tags.get("addr:housenumber", "")
+            name = props.get("name", "Benzinkút")
+            street = props.get("street", "")
+            housenumber = props.get("housenumber", "")
+            city = props.get("city", "")
 
             full_name = name
 
             if street:
                 full_name += ", " + street
 
-            if number:
-                full_name += " " + number
+            if housenumber:
+                full_name += " " + housenumber
 
-            item_lat = item.get("lat")
-            item_lon = item.get("lon")
+            if city:
+                full_name += ", " + city
 
-            if item_lat is None:
-                item_lat = item.get("center", {}).get("lat")
-
-            if item_lon is None:
-                item_lon = item.get("center", {}).get("lon")
-
-            if item_lat is None or item_lon is None:
-                continue
+            item_lat = props["lat"]
+            item_lon = props["lon"]
 
             dist = distance_km(lat, lon, item_lat, item_lon)
 
             brand = detect_brand(name)
 
-            # ár márka alapján
-            price = prices.get(brand, 0)
-
             stations.append({
                 "name": full_name,
                 "brand": brand,
                 "fuelType": "95 Benzin",
-                "price": price,
+                "price": 0,
                 "lat": item_lat,
                 "lon": item_lon,
                 "distance": dist
@@ -152,7 +103,7 @@ def stations():
         stations.sort(key=lambda x: x["distance"])
 
         return jsonify({
-            "stations": stations[:20]
+            "stations": stations
         })
 
     except Exception as e:
@@ -161,8 +112,5 @@ def stations():
             "stations": []
         })
 
-# -------------------------------------------------
-# Indítás
-# -------------------------------------------------
 if __name__ == "__main__":
     app.run()
