@@ -6,9 +6,9 @@ import os
 
 app = Flask(__name__)
 
-# ---------------------------------------------------
-# Ár adatbázis betöltés
-# ---------------------------------------------------
+# -------------------------------------------------
+# Árak betöltése (ha van prices.json)
+# -------------------------------------------------
 def load_prices():
     if os.path.exists("prices.json"):
         with open("prices.json", "r", encoding="utf-8") as f:
@@ -17,15 +17,15 @@ def load_prices():
 
 prices = load_prices()
 
-# ---------------------------------------------------
-# Távolság km
-# ---------------------------------------------------
+# -------------------------------------------------
+# Távolság számítás km
+# -------------------------------------------------
 def distance_km(lat1, lon1, lat2, lon2):
-    return math.sqrt((lat1-lat2)**2 + (lon1-lon2)**2) * 111
+    return math.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2) * 111
 
-# ---------------------------------------------------
-# Kút márka felismerés
-# ---------------------------------------------------
+# -------------------------------------------------
+# Márka felismerés
+# -------------------------------------------------
 def detect_brand(name):
     n = name.lower()
 
@@ -44,16 +44,39 @@ def detect_brand(name):
     else:
         return "Benzinkút"
 
-# ---------------------------------------------------
+# -------------------------------------------------
 # Főoldal
-# ---------------------------------------------------
+# -------------------------------------------------
 @app.route("/")
 def home():
     return "API működik"
 
-# ---------------------------------------------------
+# -------------------------------------------------
+# Overpass lekérés több szerverrel
+# -------------------------------------------------
+def get_overpass_data(query):
+
+    urls = [
+        "https://overpass-api.de/api/interpreter",
+        "https://lz4.overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter"
+    ]
+
+    for url in urls:
+        try:
+            r = requests.post(url, data=query, timeout=20)
+
+            if r.status_code == 200:
+                return r.json()
+
+        except:
+            pass
+
+    return None
+
+# -------------------------------------------------
 # Kutak
-# ---------------------------------------------------
+# -------------------------------------------------
 @app.route("/stations")
 def stations():
 
@@ -61,7 +84,7 @@ def stations():
     lon = request.args.get("lon", default=19.0402, type=float)
 
     query = f"""
-    [out:json];
+    [out:json][timeout:25];
     (
       node["amenity"="fuel"](around:8000,{lat},{lon});
       way["amenity"="fuel"](around:8000,{lat},{lon});
@@ -70,11 +93,14 @@ def stations():
     out center tags;
     """
 
-    url = "https://overpass-api.de/api/interpreter"
-
     try:
-        r = requests.post(url, data=query, timeout=20)
-        data = r.json()
+        data = get_overpass_data(query)
+
+        if data is None:
+            return jsonify({
+                "error": "Nem elérhető térképszerver",
+                "stations": []
+            })
 
         stations = []
 
@@ -83,28 +109,39 @@ def stations():
             tags = item.get("tags", {})
 
             name = tags.get("name", "Benzinkút")
-            addr = tags.get("addr:street", "")
+            street = tags.get("addr:street", "")
             number = tags.get("addr:housenumber", "")
 
             full_name = name
-            if addr:
-                full_name += f", {addr}"
-            if number:
-                full_name += f" {number}"
 
-            item_lat = item.get("lat") or item.get("center", {}).get("lat")
-            item_lon = item.get("lon") or item.get("center", {}).get("lon")
+            if street:
+                full_name += ", " + street
+
+            if number:
+                full_name += " " + number
+
+            item_lat = item.get("lat")
+            item_lon = item.get("lon")
+
+            if item_lat is None:
+                item_lat = item.get("center", {}).get("lat")
+
+            if item_lon is None:
+                item_lon = item.get("center", {}).get("lon")
 
             if item_lat is None or item_lon is None:
                 continue
 
             dist = distance_km(lat, lon, item_lat, item_lon)
 
-            price = prices.get(name, 0)
+            brand = detect_brand(name)
+
+            # ár márka alapján
+            price = prices.get(brand, 0)
 
             stations.append({
                 "name": full_name,
-                "brand": detect_brand(name),
+                "brand": brand,
                 "fuelType": "95 Benzin",
                 "price": price,
                 "lat": item_lat,
@@ -124,5 +161,8 @@ def stations():
             "stations": []
         })
 
+# -------------------------------------------------
+# Indítás
+# -------------------------------------------------
 if __name__ == "__main__":
     app.run()
