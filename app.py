@@ -21,7 +21,6 @@ def distance_km(lat1, lon1, lat2, lon2):
     )
 
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
     return r * c
 
 
@@ -37,34 +36,12 @@ def detect_brand(name):
         return "MOL"
     elif "omv" in n:
         return "OMV"
-    elif "lukoil" in n:
-        return "Lukoil"
     elif "orlen" in n:
         return "Orlen"
-    elif "avia" in n:
-        return "Avia"
+    elif "lukoil" in n:
+        return "Lukoil"
     else:
         return "Benzinkút"
-
-
-# ---------------------------------------------------
-# CÍM
-# ---------------------------------------------------
-def build_address(tags):
-    street = tags.get("addr:street", "")
-    house = tags.get("addr:housenumber", "")
-    city = tags.get("addr:city", "")
-
-    line1 = f"{street} {house}".strip()
-
-    if line1 and city:
-        return f"{line1}, {city}"
-    elif line1:
-        return line1
-    elif city:
-        return city
-    else:
-        return "Cím nem elérhető"
 
 
 # ---------------------------------------------------
@@ -72,7 +49,7 @@ def build_address(tags):
 # ---------------------------------------------------
 @app.route("/")
 def home():
-    return "Valódi kutas szerver működik"
+    return "GPS közeli kutas szerver működik"
 
 
 # ---------------------------------------------------
@@ -85,51 +62,47 @@ def stations():
         lat = float(request.args.get("lat", 47.4979))
         lon = float(request.args.get("lon", 19.0402))
 
-        query = f"""
-[out:json][timeout:25];
-(
-  node["amenity"="fuel"](around:10000,{lat},{lon});
-  way["amenity"="fuel"](around:10000,{lat},{lon});
-  relation["amenity"="fuel"](around:10000,{lat},{lon});
-);
-out center tags;
-"""
+        # OpenStreetMap Nominatim keresés
+        url = "https://nominatim.openstreetmap.org/search"
 
-        response = requests.get(
-            "https://lz4.overpass-api.de/api/interpreter",
-            params={"data": query},
-            timeout=30
+        params = {
+            "q": "fuel station",
+            "format": "jsonv2",
+            "limit": 50,
+            "bounded": 1,
+            "viewbox": f"{lon-0.15},{lat+0.15},{lon+0.15},{lat-0.15}",
+            "countrycodes": "hu"
+        }
+
+        headers = {
+            "User-Agent": "uzemanyagarfigyelo"
+        }
+
+        r = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=20
         )
 
-        data = response.json()
+        data = r.json()
 
         result = []
 
-        for item in data.get("elements", []):
+        for item in data:
 
-            tags = item.get("tags", {})
-
-            name = tags.get("name", "Benzinkút")
-            brand = detect_brand(name)
-            address = build_address(tags)
-
-            if "lat" in item:
-                s_lat = item["lat"]
-                s_lon = item["lon"]
-            else:
-                center = item.get("center", {})
-                s_lat = center.get("lat")
-                s_lon = center.get("lon")
-
-            if s_lat is None or s_lon is None:
-                continue
+            name = item.get("display_name", "Benzinkút")
+            s_lat = float(item["lat"])
+            s_lon = float(item["lon"])
 
             dist = distance_km(lat, lon, s_lat, s_lon)
 
+            brand = detect_brand(name)
+
             result.append({
-                "name": name,
+                "name": name.split(",")[0],
                 "brand": brand,
-                "fuelType": address,
+                "fuelType": name,
                 "price": 0,
                 "lat": s_lat,
                 "lon": s_lon,
@@ -143,6 +116,7 @@ out center tags;
         })
 
     except Exception as e:
+
         return jsonify({
             "stations": [],
             "error": str(e)
