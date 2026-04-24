@@ -1,31 +1,30 @@
 from flask import Flask, jsonify, request
 import requests
 import math
+import json
+import os
 
 app = Flask(__name__)
 
 # ---------------------------------------------------
-# TÁVOLSÁG KM
+# Ár adatbázis betöltés
+# ---------------------------------------------------
+def load_prices():
+    if os.path.exists("prices.json"):
+        with open("prices.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+prices = load_prices()
+
+# ---------------------------------------------------
+# Távolság km
 # ---------------------------------------------------
 def distance_km(lat1, lon1, lat2, lon2):
-    r = 6371.0
-
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(dlat / 2) ** 2 +
-        math.cos(math.radians(lat1)) *
-        math.cos(math.radians(lat2)) *
-        math.sin(dlon / 2) ** 2
-    )
-
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return r * c
-
+    return math.sqrt((lat1-lat2)**2 + (lon1-lon2)**2) * 111
 
 # ---------------------------------------------------
-# MÁRKA FELISMERÉS
+# Kút márka felismerés
 # ---------------------------------------------------
 def detect_brand(name):
     n = name.lower()
@@ -36,92 +35,94 @@ def detect_brand(name):
         return "MOL"
     elif "omv" in n:
         return "OMV"
-    elif "orlen" in n:
-        return "Orlen"
     elif "lukoil" in n:
         return "Lukoil"
+    elif "orlen" in n:
+        return "Orlen"
+    elif "avia" in n:
+        return "Avia"
     else:
         return "Benzinkút"
 
-
 # ---------------------------------------------------
-# FŐOLDAL
+# Főoldal
 # ---------------------------------------------------
 @app.route("/")
 def home():
-    return "GPS közeli kutas szerver működik"
-
+    return "API működik"
 
 # ---------------------------------------------------
-# API
+# Kutak
 # ---------------------------------------------------
 @app.route("/stations")
 def stations():
 
+    lat = request.args.get("lat", default=47.4979, type=float)
+    lon = request.args.get("lon", default=19.0402, type=float)
+
+    query = f"""
+    [out:json];
+    (
+      node["amenity"="fuel"](around:8000,{lat},{lon});
+      way["amenity"="fuel"](around:8000,{lat},{lon});
+      relation["amenity"="fuel"](around:8000,{lat},{lon});
+    );
+    out center tags;
+    """
+
+    url = "https://overpass-api.de/api/interpreter"
+
     try:
-        lat = float(request.args.get("lat", 47.4979))
-        lon = float(request.args.get("lon", 19.0402))
-
-        # OpenStreetMap Nominatim keresés
-        url = "https://nominatim.openstreetmap.org/search"
-
-        params = {
-            "q": "fuel station",
-            "format": "jsonv2",
-            "limit": 50,
-            "bounded": 1,
-            "viewbox": f"{lon-0.15},{lat+0.15},{lon+0.15},{lat-0.15}",
-            "countrycodes": "hu"
-        }
-
-        headers = {
-            "User-Agent": "uzemanyagarfigyelo"
-        }
-
-        r = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=20
-        )
-
+        r = requests.post(url, data=query, timeout=20)
         data = r.json()
 
-        result = []
+        stations = []
 
-        for item in data:
+        for item in data["elements"]:
 
-            name = item.get("display_name", "Benzinkút")
-            s_lat = float(item["lat"])
-            s_lon = float(item["lon"])
+            tags = item.get("tags", {})
 
-            dist = distance_km(lat, lon, s_lat, s_lon)
+            name = tags.get("name", "Benzinkút")
+            addr = tags.get("addr:street", "")
+            number = tags.get("addr:housenumber", "")
 
-            brand = detect_brand(name)
+            full_name = name
+            if addr:
+                full_name += f", {addr}"
+            if number:
+                full_name += f" {number}"
 
-            result.append({
-                "name": name.split(",")[0],
-                "brand": brand,
-                "fuelType": name,
-                "price": 0,
-                "lat": s_lat,
-                "lon": s_lon,
+            item_lat = item.get("lat") or item.get("center", {}).get("lat")
+            item_lon = item.get("lon") or item.get("center", {}).get("lon")
+
+            if item_lat is None or item_lon is None:
+                continue
+
+            dist = distance_km(lat, lon, item_lat, item_lon)
+
+            price = prices.get(name, 0)
+
+            stations.append({
+                "name": full_name,
+                "brand": detect_brand(name),
+                "fuelType": "95 Benzin",
+                "price": price,
+                "lat": item_lat,
+                "lon": item_lon,
                 "distance": dist
             })
 
-        result.sort(key=lambda x: x["distance"])
+        stations.sort(key=lambda x: x["distance"])
 
         return jsonify({
-            "stations": result[:25]
+            "stations": stations[:20]
         })
 
     except Exception as e:
-
         return jsonify({
-            "stations": [],
-            "error": str(e)
+            "error": str(e),
+            "stations": []
         })
 
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run()
