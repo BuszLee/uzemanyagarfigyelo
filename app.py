@@ -2,11 +2,16 @@ from flask import Flask, jsonify, request
 import requests
 import math
 import re
-from datetime import datetime
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
+# -------------------------------------------------
+# IDE írd a saját Geoapify kulcsodat
+# -------------------------------------------------
 API_KEY = "fdfd01a4bf2748849f763d1efee731dd"
+
 
 # -------------------------------------------------
 # TÁVOLSÁG
@@ -16,7 +21,7 @@ def distance_km(lat1, lon1, lat2, lon2):
 
 
 # -------------------------------------------------
-# MÁRKA FELISMERÉS
+# MÁRKA
 # -------------------------------------------------
 def detect_brand(name):
     n = name.lower()
@@ -29,51 +34,171 @@ def detect_brand(name):
         return "OMV"
     elif "lukoil" in n:
         return "Lukoil"
+    elif "avia" in n:
+        return "Avia"
     else:
         return "Benzinkút"
 
 
 # -------------------------------------------------
-# VALÓDI HÍRFIGYELŐ RADAR
+# DÁTUM PARSE
 # -------------------------------------------------
-def get_real_radar():
+def parse_date(txt):
+    try:
+        return datetime.strptime(
+            txt[:25],
+            "%a, %d %b %Y %H:%M:%S"
+        )
+    except:
+        return None
 
-    sources = [
-        "https://www.portfolio.hu",
-        "https://www.vg.hu",
-        "https://www.economx.hu"
+
+# -------------------------------------------------
+# FT KIOLVASÁS
+# -------------------------------------------------
+def extract_ft(text):
+
+    patterns = [
+        r'(\d+)\s*ft',
+        r'(\d+)\s*forint'
     ]
+
+    for p in patterns:
+        m = re.search(p, text.lower())
+        if m:
+            return m.group(1)
+
+    return None
+
+
+# -------------------------------------------------
+# SZÖVEG ELEMZÉS
+# -------------------------------------------------
+def analyze_text(title, desc):
+
+    txt = (title + " " + desc).lower()
 
     keywords = [
         "üzemanyag",
         "benzin",
         "gázolaj",
+        "tankol",
         "drágul",
         "csökken",
-        "változik"
+        "árváltozás",
+        "holtankoljak"
     ]
 
+    if not any(k in txt for k in keywords):
+        return None
+
+    amount = extract_ft(txt)
+
+    if "drágul" in txt or "emelkedik" in txt:
+        if amount:
+            return f"⚠️ Várható drágulás (+{amount} Ft)"
+        return "⚠️ Várható drágulás"
+
+    if "csökken" in txt:
+        if amount:
+            return f"📉 Várható csökkenés (-{amount} Ft)"
+        return "📉 Várható csökkenés"
+
+    return "⚠️ Friss üzemanyagár hír jelent meg"
+
+
+# -------------------------------------------------
+# RSS FIGYELÉS
+# -------------------------------------------------
+def check_rss(url, source_name):
+
     try:
-        for url in sources:
+        r = requests.get(url, timeout=10)
+        root = ET.fromstring(r.content)
 
-            r = requests.get(url, timeout=10)
-            text = r.text.lower()
+        items = root.findall(".//item")
 
-            if any(word in text for word in keywords):
+        for item in items[:5]:
 
-                # Ft keresés
-                match = re.search(r'(\d+)\s*ft', text)
+            title = item.findtext("title", "")
+            desc = item.findtext("description", "")
+            pub = item.findtext("pubDate", "")
 
-                if match:
-                    price = match.group(1)
-                    return f"⚠️ Friss hír: üzemanyagár változás várható ({price} Ft említve)"
+            result = analyze_text(title, desc)
 
-                return "⚠️ Friss hír jelent meg üzemanyagár témában."
+            if result:
+                return f"{result} | Forrás: {source_name}"
 
-        return "✔️ Jelenleg nincs friss bejelentett árváltozás."
+        return None
 
     except:
-        return "⚠️ Radar átmenetileg nem elérhető."
+        return None
+
+
+# -------------------------------------------------
+# HTML FIGYELÉS (holtankoljak)
+# -------------------------------------------------
+def check_html(url, source_name):
+
+    try:
+        r = requests.get(url, timeout=10)
+        text = r.text.lower()
+
+        if any(x in text for x in [
+            "benzin ára",
+            "gázolaj ára",
+            "üzemanyagár",
+            "drágul",
+            "csökken"
+        ]):
+
+            ft = extract_ft(text)
+
+            if "drágul" in text:
+                if ft:
+                    return f"⚠️ Várható drágulás (+{ft} Ft) | Forrás: {source_name}"
+                return f"⚠️ Várható drágulás | Forrás: {source_name}"
+
+            if "csökken" in text:
+                if ft:
+                    return f"📉 Várható csökkenés (-{ft} Ft) | Forrás: {source_name}"
+                return f"📉 Várható csökkenés | Forrás: {source_name}"
+
+            return f"⚠️ Friss üzemanyagár hír | Forrás: {source_name}"
+
+        return None
+
+    except:
+        return None
+
+
+# -------------------------------------------------
+# RADAR PRO
+# -------------------------------------------------
+def get_radar():
+
+    sources = [
+
+        # RSS-ek
+        ("rss", "https://www.portfolio.hu/rss/all.xml", "Portfolio"),
+        ("rss", "https://www.vg.hu/feed", "VG"),
+        ("rss", "https://economx.hu/rss", "Economx"),
+
+        # HTML
+        ("html", "https://holtankoljak.hu", "Holtankoljak")
+    ]
+
+    for mode, url, name in sources:
+
+        if mode == "rss":
+            result = check_rss(url, name)
+        else:
+            result = check_html(url, name)
+
+        if result:
+            return result
+
+    return "✔️ Jelenleg nincs friss bejelentett árváltozás."
 
 
 # -------------------------------------------------
@@ -81,7 +206,7 @@ def get_real_radar():
 # -------------------------------------------------
 @app.route("/")
 def home():
-    return "Valós Radar API működik"
+    return "Radar Pro API működik"
 
 
 # -------------------------------------------------
@@ -97,7 +222,7 @@ def stations():
         f"https://api.geoapify.com/v2/places?"
         f"categories=service.vehicle.fuel"
         f"&filter=circle:{lon},{lat},5000"
-        f"&limit=20"
+        f"&limit=25"
         f"&apiKey={API_KEY}"
     )
 
@@ -105,7 +230,7 @@ def stations():
         r = requests.get(url, timeout=20)
         data = r.json()
 
-        stations = []
+        result = []
 
         for item in data["features"]:
 
@@ -123,31 +248,31 @@ def stations():
             if number:
                 full_name += " " + number
 
-            item_lat = p["lat"]
-            item_lon = p["lon"]
+            alat = p["lat"]
+            alon = p["lon"]
 
-            dist = distance_km(lat, lon, item_lat, item_lon)
+            dist = distance_km(lat, lon, alat, alon)
 
-            stations.append({
+            result.append({
                 "name": full_name,
                 "brand": detect_brand(name),
                 "fuelType": "Ismeretlen",
                 "price": 0,
-                "lat": item_lat,
-                "lon": item_lon,
+                "lat": alat,
+                "lon": alon,
                 "distance": round(dist, 2)
             })
 
-        stations.sort(key=lambda x: x["distance"])
+        result.sort(key=lambda x: x["distance"])
 
         return jsonify({
-            "radar": get_real_radar(),
-            "stations": stations
+            "radar": get_radar(),
+            "stations": result
         })
 
     except Exception as e:
         return jsonify({
-            "radar": "⚠️ Nem elérhető a térképszerver.",
+            "radar": "⚠️ Térképszerver nem elérhető.",
             "stations": []
         })
 
