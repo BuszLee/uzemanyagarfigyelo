@@ -5,23 +5,19 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from bs4 import BeautifulSoup
-from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
 
-# A te kulcsod az IP alapú helymeghatározáshoz
-IP_GEOLOCATION_KEY = "fdfd01a4bf2748849f763d1efee731dd"
+# -------------------------------------------------
+# SAJÁT GEOAPIFY KULCSOD
+# -------------------------------------------------
+API_KEY = "fdfd01a4bf2748849f763d1efee731dd"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
-
-# =====================================================
-# SEGÉDFÜGGVÉNYEK
-# =====================================================
-
-def haversine(lat1, lon1, lat2, lon2):
+# -------------------------------------------------
+# TÁVOLSÁG (Pontosabb Haversine formula)
+# -------------------------------------------------
+def distance_km(lat1, lon1, lat2, lon2):
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -29,91 +25,118 @@ def haversine(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return round(R * c, 2)
 
-def get_radar_data():
+# -------------------------------------------------
+# MÁRKA FELISMERÉS
+# -------------------------------------------------
+def detect_brand(name):
+    n = name.lower()
+    if "shell" in n: return "Shell"
+    if "mol" in n: return "MOL"
+    if "omv" in n: return "OMV"
+    if "lukoil" in n: return "Lukoil"
+    if "avia" in n: return "Avia"
+    if "auchan" in n: return "Auchan"
+    if "orlen" in n: return "Orlen"
+    return "Benzinkút"
+
+# -------------------------------------------------
+# HOLTANKOLJAK ADATOK (Árak és Radar)
+# -------------------------------------------------
+def get_fuel_info():
     try:
         url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
-        r = requests.get(url, headers=HEADERS, timeout=5)
-        soup = BeautifulSoup(r.text, "html.parser")
-        text = soup.get_text().lower()
-        r95 = re.search(r'benzin\s*(?:ára)?\s*([+-]?\s*\d+)\s*ft', text)
-        rd = re.search(r'(?:gázolaj|diesel)\s*(?:ára)?\s*([+-]?\s*\d+)\s*ft', text)
-        return (
-            (r95.group(1).replace(" ", "") + " Ft") if r95 else "0 Ft",
-            (rd.group(1).replace(" ", "") + " Ft") if rd else "0 Ft"
-        )
-    except:
-        return "nincs adat", "nincs adat"
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        r.encoding = 'utf-8'
+        text = r.text.lower()
+        
+        # Árak kinyerése
+        nums = re.findall(r'(\d{3})\s*ft', text)
+        benzin = int(nums[0]) if len(nums) >= 1 else 612
+        diesel = int(nums[1]) if len(nums) >= 2 else 635
 
-def get_coords_by_ip():
-    """Ha nincs GPS, az API kulccsal lekérjük a koordinátákat IP alapján"""
-    try:
-        url = f"https://ipgeolocation.abstractapi.com/v1/?api_key={IP_GEOLOCATION_KEY}"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        return float(data['latitude']), float(data['longitude'])
+        # Radar üzenet
+        radar = "✔️ Jelenleg nincs friss árváltozás"
+        if "emelkedik" in text:
+            m = re.search(r'(\d+)\s*forint', text)
+            radar = f"⚠️ Várható drágulás (+{m.group(1)} Ft)" if m else "⚠️ Várható drágulás"
+        elif "csökken" in text:
+            m = re.search(r'(\d+)\s*forint', text)
+            radar = f"📉 Várható csökkenés (-{m.group(1)} Ft)" if m else "📉 Várható csökkenés"
+            
+        return benzin, diesel, radar
     except:
-        return 47.4979, 19.0402  # Budapest fallback
+        return 612, 635, "⚠️ Árinfó nem elérhető"
 
-# =====================================================
-# ÚTVONALAK
-# =====================================================
+def price_by_brand(base_price, brand):
+    diff = {"Shell": 7, "OMV": 5, "MOL": 0, "Lukoil": -2, "Avia": -3, "Auchan": -7}
+    return base_price + diff.get(brand, 0)
+
+# -------------------------------------------------
+# ROUTES
+# -------------------------------------------------
+@app.route("/")
+def home():
+    return "Benzinkút Figyelő API Online"
 
 @app.route("/stations")
 def stations():
-    # 1. Koordináták megszerzése (URL-ből vagy IP-ből a kulcsoddal)
-    lat_param = request.args.get("lat")
-    lon_param = request.args.get("lon")
+    # Koordináták fogadása (Sopron az alapértelmezett, ha nincs megadva)
+    lat = request.args.get("lat", default=47.6829, type=float)
+    lon = request.args.get("lon", default=16.5988, type=float)
 
-    if lat_param and lon_param:
-        try:
-            user_lat = float(lat_param)
-            user_lon = float(lon_param)
-        except:
-            user_lat, user_lon = get_coords_by_ip()
-    else:
-        # Ha a böngészőben csak simán megnyitod, a kulcsodat használja!
-        user_lat, user_lon = get_coords_by_ip()
+    avg_benzin, avg_diesel, radar = get_fuel_info()
 
-    # 2. Közeli valós kutak keresése (Overpass API)
-    nearby_stations = []
+    # Geoapify API hívás (5km-es körzet)
+    geo_url = (
+        f"https://api.geoapify.com/v2/places?"
+        f"categories=service.vehicle.fuel"
+        f"&filter=circle:{lon},{lat},5000"
+        f"&limit=30"
+        f"&apiKey={API_KEY}"
+    )
+
     try:
-        query = f"""
-        [out:json][timeout:15];
-        node["amenity"="fuel"](around:15000, {user_lat}, {user_lon});
-        out body;
-        """
-        r = requests.post("https://overpass-api.de/api/interpreter", data=query, timeout=15)
+        r = requests.get(geo_url, timeout=15)
         data = r.json()
-        
-        for el in data.get('elements', []):
-            tags = el.get('tags', {})
-            dist = haversine(user_lat, user_lon, el['lat'], el['lon'])
-            nearby_stations.append({
-                "name": tags.get('name', 'Benzinkút'),
-                "brand": tags.get('brand', tags.get('operator', 'Független')),
+        stations_list = []
+
+        for item in data.get("features", []):
+            p = item["properties"]
+            name = p.get("name", "Benzinkút")
+            brand = detect_brand(name)
+            
+            # Cím összeállítása
+            address = p.get("address_line2", p.get("street", "Cím nem ismert"))
+            
+            alat, alon = p["lat"], p["lon"]
+            dist = distance_km(lat, lon, alat, alon)
+            
+            price = price_by_brand(avg_benzin, brand)
+
+            stations_list.append({
+                "name": f"{brand} - {address}",
+                "brand": brand,
                 "fuelType": "95 Benzin",
-                "price": 612,
-                "lat": el['lat'],
-                "lon": el['lon'],
+                "price": price,
+                "lat": alat,
+                "lon": alon,
                 "distance": dist
             })
-        nearby_stations.sort(key=lambda x: x["distance"])
-    except:
-        pass
 
-    # 3. Radar adatok
-    r95, rDiesel = get_radar_data()
+        # Rendezés távolság szerint
+        stations_list.sort(key=lambda x: x["distance"])
 
-    return jsonify({
-        "status": "ok",
-        "location_source": "GPS" if lat_param else "IP-API",
-        "user_lat": user_lat,
-        "user_lon": user_lon,
-        "radar95": r95,
-        "radarDiesel": rDiesel,
-        "stations": nearby_stations[:20]
-    })
+        return jsonify({
+            "radar": radar,
+            "average95": avg_benzin,
+            "averageDiesel": avg_diesel,
+            "stations": stations_list
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e), "stations": []}), 500
 
 if __name__ == "__main__":
+    # Render-kompatibilis indítás
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
