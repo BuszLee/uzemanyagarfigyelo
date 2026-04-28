@@ -1,10 +1,10 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
-import math
-import time
-import re
 from bs4 import BeautifulSoup
+import math
+import re
+import time
 from datetime import datetime
 
 app = Flask(__name__)
@@ -55,8 +55,6 @@ def detect_brand(name):
         return "Orlen"
     if "AVIA" in n:
         return "Avia"
-    if "LUKOIL" in n:
-        return "Lukoil"
 
     return "Benzinkút"
 
@@ -68,7 +66,6 @@ def estimate_price(brand):
         "Shell": 675,
         "Orlen": 667,
         "Avia": 664,
-        "Lukoil": 666,
         "Benzinkút": 665
     }
     return prices.get(brand, 665)
@@ -86,75 +83,113 @@ def next_change_day():
 
 
 # =====================================================
-# REAL GPS STATIONS (OSM)
+# GEOCODE ADDRESS -> COORD
 # =====================================================
 
-def load_nearby_stations(user_lat, user_lon):
+def geocode(address):
 
-    key = f"{round(user_lat,3)}_{round(user_lon,3)}"
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={
+                "q": address + ", Hungary",
+                "format": "json",
+                "limit": 1
+            },
+            headers=HEADERS,
+            timeout=10
+        )
+
+        data = r.json()
+
+        if len(data) > 0:
+            return (
+                float(data[0]["lat"]),
+                float(data[0]["lon"])
+            )
+
+    except:
+        pass
+
+    return None, None
+
+
+# =====================================================
+# REAL STATIONS FROM HOLTANKOLJAK
+# =====================================================
+
+def load_real_stations(user_lat, user_lon):
+
+    key = f"{round(user_lat,2)}_{round(user_lon,2)}"
 
     if key in cache:
         if time.time() - cache[key]["time"] < CACHE_SECONDS:
             return cache[key]["data"]
 
-    query = f"""
-    [out:json][timeout:25];
-    (
-      node["amenity"="fuel"](around:10000,{user_lat},{user_lon});
-      way["amenity"="fuel"](around:10000,{user_lat},{user_lon});
-      relation["amenity"="fuel"](around:10000,{user_lat},{user_lon});
-    );
-    out center;
-    """
-
     try:
+        url = "https://holtankoljak.hu"
+
         r = requests.get(
-            "https://overpass-api.de/api/interpreter",
-            params={"data": query},
-            timeout=25,
-            headers=HEADERS
+            url,
+            headers=HEADERS,
+            timeout=10
         )
 
-        data = r.json()
+        html = r.text
+
+        text = BeautifulSoup(
+            html,
+            "html.parser"
+        ).get_text("\n", strip=True)
+
+        lines = text.split("\n")
 
         result = []
 
-        for item in data["elements"]:
+        for line in lines:
 
-            tags = item.get("tags", {})
+            if len(result) >= 20:
+                break
 
-            name = tags.get("name", "Benzinkút")
+            if any(x in line.upper() for x in [
+                "OMV", "MOL", "SHELL", "ORLEN", "AVIA"
+            ]):
 
-            lat = item.get("lat")
-            lon = item.get("lon")
+                nums = re.findall(r'\d{3}', line)
 
-            if lat is None:
-                center = item.get("center", {})
-                lat = center.get("lat")
-                lon = center.get("lon")
+                if len(nums) == 0:
+                    continue
 
-            if lat is None or lon is None:
-                continue
+                price = int(nums[0])
 
-            brand = detect_brand(name)
+                name = line[:70].strip()
+                brand = detect_brand(name)
 
-            result.append({
-                "name": name,
-                "brand": brand,
-                "fuelType": "95 Benzin",
-                "price": estimate_price(brand),
-                "lat": lat,
-                "lon": lon,
-                "distance": haversine(
+                lat, lon = geocode(name)
+
+                if lat is None:
+                    continue
+
+                dist = haversine(
                     user_lat,
                     user_lon,
                     lat,
                     lon
                 )
-            })
 
-        result.sort(key=lambda x: x["distance"])
-        result = result[:25]
+                result.append({
+                    "name": name,
+                    "brand": brand,
+                    "fuelType": "95 Benzin",
+                    "price": price,
+                    "lat": lat,
+                    "lon": lon,
+                    "distance": dist
+                })
+
+        result.sort(
+            key=lambda x: x["distance"]
+        )
 
         cache[key] = {
             "time": time.time(),
@@ -164,6 +199,9 @@ def load_nearby_stations(user_lat, user_lon):
         return result
 
     except:
+        if key in cache:
+            return cache[key]["data"]
+
         return []
 
 
@@ -224,7 +262,7 @@ def load_radar():
 
 @app.route("/")
 def home():
-    return "GPS REAL Backend ONLINE"
+    return "FINAL HYBRID REAL Backend ONLINE"
 
 
 @app.route("/stations")
@@ -238,7 +276,7 @@ def stations():
         request.args.get("lon", 19.0402)
     )
 
-    rows = load_nearby_stations(
+    rows = load_real_stations(
         user_lat,
         user_lon
     )
