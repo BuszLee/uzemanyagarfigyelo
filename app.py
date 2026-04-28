@@ -1,229 +1,222 @@
 from flask import Flask, jsonify, request
-from flask_cors import CORS
 import requests
-from bs4 import BeautifulSoup
 import math
 import re
-from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+# -------------------------------------------------
+# SAJÁT GEOAPIFY KULCS
+# -------------------------------------------------
+API_KEY = "IDE_IRD_A_GEOAPIFY_KULCSOD"
 
-# =====================================================
-# SEGÉDEK
-# =====================================================
 
+# -------------------------------------------------
+# TÁVOLSÁG
+# -------------------------------------------------
 def distance_km(lat1, lon1, lat2, lon2):
-    r = 6371
-
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
-    )
-
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-    return round(r * c, 2)
+    return math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2) * 111
 
 
-def to_int(text):
-    m = re.search(r"(\d+)", text)
-    return int(m.group(1)) if m else 0
+# -------------------------------------------------
+# MÁRKA FELISMERÉS
+# -------------------------------------------------
+def detect_brand(name):
+
+    n = name.lower()
+
+    if "shell" in n:
+        return "Shell"
+    elif "mol" in n:
+        return "MOL"
+    elif "omv" in n:
+        return "OMV"
+    elif "lukoil" in n:
+        return "Lukoil"
+    elif "avia" in n:
+        return "Avia"
+    elif "auchan" in n:
+        return "Auchan"
+    else:
+        return "Benzinkút"
 
 
-# =====================================================
-# VALÓS KUTAK SCRAPER
-# =====================================================
-
-def scrape_real_stations(user_lat, user_lon):
-
-    url = "https://holtankoljak.hu"
+# -------------------------------------------------
+# HOLTANKOLJAK ÁTLAGÁRAK
+# -------------------------------------------------
+def get_average_prices():
 
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
+        url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
 
-        text = soup.get_text(" ", strip=True)
-
-        # --------------------------------------------
-        # FONTOS:
-        # Holtankoljak oldal gyakran JS-ből tölti az adatot.
-        # Ezért fallback parser + regex használat.
-        # --------------------------------------------
-
-        pattern = re.findall(
-            r'([A-ZŐÚÜÁÉÍÓa-z0-9 ,\-\.\(\)]+?)\s+(\d{3})\s*Ft',
-            text
+        r = requests.get(
+            url,
+            timeout=15,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
         )
 
+        text = r.text.lower()
+
+        nums = re.findall(r'(\d{3})\s*ft', text)
+
+        if len(nums) >= 2:
+            benzin = int(nums[0])
+            diesel = int(nums[1])
+
+            return benzin, diesel
+
+        return 620, 640
+
+    except:
+        return 620, 640
+
+
+# -------------------------------------------------
+# VÁLTOZÁS INFO
+# -------------------------------------------------
+def get_change_info():
+
+    try:
+        url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
+
+        r = requests.get(
+            url,
+            timeout=15,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+        text = r.text.lower()
+
+        if "emelkedik" in text:
+            m = re.search(r'(\d+)\s*forint', text)
+
+            if m:
+                return f"⚠️ Várható drágulás (+{m.group(1)} Ft)"
+
+            return "⚠️ Várható drágulás"
+
+        if "csökken" in text:
+            m = re.search(r'(\d+)\s*forint', text)
+
+            if m:
+                return f"📉 Várható csökkenés (-{m.group(1)} Ft)"
+
+            return "📉 Várható csökkenés"
+
+        return "✔️ Jelenleg nincs friss árváltozás"
+
+    except:
+        return "⚠️ Árfigyelő átmenetileg nem elérhető"
+
+
+# -------------------------------------------------
+# MÁRKA ÁR KORREKCIÓ
+# -------------------------------------------------
+def price_by_brand(base_price, brand):
+
+    diff = {
+        "Shell": 8,
+        "OMV": 5,
+        "MOL": 0,
+        "Lukoil": -2,
+        "Avia": -3,
+        "Auchan": -6,
+        "Benzinkút": 0
+    }
+
+    return base_price + diff.get(brand, 0)
+
+
+# -------------------------------------------------
+# HOME
+# -------------------------------------------------
+@app.route("/")
+def home():
+    return "Holtankoljak PRO API működik"
+
+
+# -------------------------------------------------
+# STATIONS
+# -------------------------------------------------
+@app.route("/stations")
+def stations():
+
+    lat = request.args.get("lat", default=47.4979, type=float)
+    lon = request.args.get("lon", default=19.0402, type=float)
+
+    avg_benzin, avg_diesel = get_average_prices()
+    radar = get_change_info()
+
+    geo_url = (
+        f"https://api.geoapify.com/v2/places?"
+        f"categories=service.vehicle.fuel"
+        f"&filter=circle:{lon},{lat},5000"
+        f"&limit=25"
+        f"&apiKey={API_KEY}"
+    )
+
+    try:
+        r = requests.get(geo_url, timeout=20)
+        data = r.json()
+
         stations = []
-        idx = 0
 
-        for row in pattern[:25]:
+        for item in data["features"]:
 
-            name = row[0].strip()
-            price = int(row[1])
+            p = item["properties"]
 
-            # Mivel publikus HTML gyakran nem ad koordinátát,
-            # ideiglenesen Budapest közeli szórás:
-            lat = user_lat + (idx * 0.004)
-            lon = user_lon + (idx * 0.003)
+            name = p.get("name", "Benzinkút")
+            street = p.get("street", "")
+            number = p.get("housenumber", "")
 
-            idx += 1
+            full = name
 
-            brand = "Benzinkút"
+            if street:
+                full += ", " + street
 
-            if "OMV" in name.upper():
-                brand = "OMV"
-            elif "MOL" in name.upper():
-                brand = "MOL"
-            elif "SHELL" in name.upper():
-                brand = "Shell"
-            elif "ORLEN" in name.upper():
-                brand = "Orlen"
+            if number:
+                full += " " + number
+
+            alat = p["lat"]
+            alon = p["lon"]
+
+            dist = distance_km(lat, lon, alat, alon)
+
+            brand = detect_brand(name)
+
+            price = price_by_brand(avg_benzin, brand)
 
             stations.append({
-                "name": name,
+                "name": full,
                 "brand": brand,
                 "fuelType": "95 Benzin",
                 "price": price,
-                "lat": round(lat, 6),
-                "lon": round(lon, 6),
-                "distance": distance_km(
-                    user_lat,
-                    user_lon,
-                    lat,
-                    lon
-                )
+                "lat": alat,
+                "lon": alon,
+                "distance": round(dist, 2)
             })
 
         stations.sort(key=lambda x: x["distance"])
 
-        return stations
-
-    except Exception as e:
-        print("SCRAPE ERROR:", e)
-        return []
-
-
-# =====================================================
-# RADAR ULTRA
-# =====================================================
-
-def detect_next_day():
-
-    wd = datetime.today().weekday()
-
-    if wd in [0, 1]:
-        return "Szerdától"
-    elif wd in [2, 3]:
-        return "Péntektől"
-    else:
-        return "Várhatóan napokon belül"
-
-
-def radar_changes():
-
-    url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
-
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        txt = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
-
-        benzin = "nincs adat"
-        diesel = "nincs adat"
-
-        m1 = re.search(
-            r'benzin.*?(\+|\-)?\s?(\d+)\s*ft',
-            txt.lower()
-        )
-
-        if m1:
-            sign = m1.group(1) or "+"
-            benzin = f"{sign}{m1.group(2)} Ft"
-
-        m2 = re.search(
-            r'(gázolaj|diesel).*?(\+|\-)?\s?(\d+)\s*ft',
-            txt.lower()
-        )
-
-        if m2:
-            sign = m2.group(2) or "+"
-            diesel = f"{sign}{m2.group(3)} Ft"
-
-        return {
-            "day": detect_next_day(),
-            "radar95": benzin,
-            "radarDiesel": diesel
-        }
-
-    except:
-        return {
-            "day": detect_next_day(),
-            "radar95": "nincs adat",
-            "radarDiesel": "nincs adat"
-        }
-
-
-# =====================================================
-# ROUTES
-# =====================================================
-
-@app.route("/")
-def home():
-    return "REAL Radar Backend ONLINE"
-
-
-@app.route("/stations")
-def stations():
-
-    lat = float(request.args.get("lat", 47.4979))
-    lon = float(request.args.get("lon", 19.0402))
-
-    stations = scrape_real_stations(lat, lon)
-
-    if len(stations) == 0:
         return jsonify({
-            "status": "Nincs elérhető friss adat",
-            "stations": [],
-            "average95": 0,
-            "averageDiesel": 0,
-            "radarDay": "",
-            "radar95": "",
-            "radarDiesel": ""
+            "radar": radar,
+            "average95": avg_benzin,
+            "averageDiesel": avg_diesel,
+            "stations": stations
         })
 
-    prices = [x["price"] for x in stations]
+    except Exception as e:
 
-    avg95 = round(sum(prices) / len(prices))
-    avgDiesel = avg95 + 28
-
-    radar = radar_changes()
-
-    return jsonify({
-        "status": "ok",
-
-        "average95": avg95,
-        "averageDiesel": avgDiesel,
-
-        "radarDay": radar["day"],
-        "radar95": radar["radar95"],
-        "radarDiesel": radar["radarDiesel"],
-
-        "stations": stations
-    })
+        return jsonify({
+            "radar": "⚠️ Térképszerver nem elérhető",
+            "stations": []
+        })
 
 
-# =====================================================
-
+# -------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run()
