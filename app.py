@@ -1,222 +1,301 @@
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 import requests
 import math
 import re
 
 app = Flask(__name__)
+CORS(app)
 
-# -------------------------------------------------
-# SAJÁT GEOAPIFY KULCS
-# -------------------------------------------------
-API_KEY = "fdfd01a4bf2748849f763d1efee731dd"
+# ======================================================
+# SEGÉDEK
+# ======================================================
+
+def haversine(lat1, lon1, lat2, lon2):
+    r = 6371.0
+
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(dlat / 2) ** 2 +
+        math.cos(math.radians(lat1)) *
+        math.cos(math.radians(lat2)) *
+        math.sin(dlon / 2) ** 2
+    )
+
+    c = 2 * math.atan2(
+        math.sqrt(a),
+        math.sqrt(1 - a)
+    )
+
+    return round(r * c, 2)
 
 
-# -------------------------------------------------
-# TÁVOLSÁG
-# -------------------------------------------------
-def distance_km(lat1, lon1, lat2, lon2):
-    return math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2) * 111
-
-
-# -------------------------------------------------
-# MÁRKA FELISMERÉS
-# -------------------------------------------------
-def detect_brand(name):
-
+def extract_brand(name: str):
     n = name.lower()
 
+    if "mol" in n:
+        return "MOL"
+    if "omv" in n:
+        return "OMV"
     if "shell" in n:
         return "Shell"
-    elif "mol" in n:
-        return "MOL"
-    elif "omv" in n:
-        return "OMV"
-    elif "lukoil" in n:
+    if "orlen" in n:
+        return "Orlen"
+    if "lukoil" in n:
         return "Lukoil"
-    elif "avia" in n:
-        return "Avia"
-    elif "auchan" in n:
-        return "Auchan"
-    else:
-        return "Benzinkút"
+
+    return "Benzinkút"
 
 
-# -------------------------------------------------
-# HOLTANKOLJAK ÁTLAGÁRAK
-# -------------------------------------------------
-def get_average_prices():
+# ======================================================
+# VALÓS ÁR BECSLÉS
+# ======================================================
 
-    try:
-        url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
-
-        r = requests.get(
-            url,
-            timeout=15,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            }
-        )
-
-        text = r.text.lower()
-
-        nums = re.findall(r'(\d{3})\s*ft', text)
-
-        if len(nums) >= 2:
-            benzin = int(nums[0])
-            diesel = int(nums[1])
-
-            return benzin, diesel
-
-        return 620, 640
-
-    except:
-        return 620, 640
-
-
-# -------------------------------------------------
-# VÁLTOZÁS INFO
-# -------------------------------------------------
-def get_change_info():
+def scrape_average_price():
+    """
+    holtankoljak.hu változás oldal alapján
+    országos becsült átlag
+    """
 
     try:
         url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
 
-        r = requests.get(
+        html = requests.get(
             url,
-            timeout=15,
+            timeout=8,
             headers={
-                "User-Agent": "Mozilla/5.0"
+                "User-Agent":
+                "Mozilla/5.0"
             }
+        ).text
+
+        prices = re.findall(
+            r'(\d{3})\s*Ft',
+            html
         )
 
-        text = r.text.lower()
+        nums = [
+            int(x)
+            for x in prices
+            if 500 <= int(x) <= 900
+        ]
 
-        if "emelkedik" in text:
-            m = re.search(r'(\d+)\s*forint', text)
-
-            if m:
-                return f"⚠️ Várható drágulás (+{m.group(1)} Ft)"
-
-            return "⚠️ Várható drágulás"
-
-        if "csökken" in text:
-            m = re.search(r'(\d+)\s*forint', text)
-
-            if m:
-                return f"📉 Várható csökkenés (-{m.group(1)} Ft)"
-
-            return "📉 Várható csökkenés"
-
-        return "✔️ Jelenleg nincs friss árváltozás"
+        if nums:
+            avg = round(sum(nums) / len(nums))
+            return avg
 
     except:
-        return "⚠️ Árfigyelő átmenetileg nem elérhető"
+        pass
+
+    return 667
 
 
-# -------------------------------------------------
-# MÁRKA ÁR KORREKCIÓ
-# -------------------------------------------------
-def price_by_brand(base_price, brand):
+def estimated_price(brand, avg95):
 
     diff = {
-        "Shell": 8,
-        "OMV": 5,
         "MOL": 0,
-        "Lukoil": -2,
-        "Avia": -3,
-        "Auchan": -6,
+        "OMV": 5,
+        "Shell": 8,
+        "Orlen": -2,
+        "Lukoil": -1,
         "Benzinkút": 0
     }
 
-    return base_price + diff.get(brand, 0)
+    return avg95 + diff.get(brand, 0)
 
 
-# -------------------------------------------------
-# HOME
-# -------------------------------------------------
-@app.route("/")
-def home():
-    return "Holtankoljak PRO API működik"
+# ======================================================
+# RADAR
+# ======================================================
+
+def get_radar():
+
+    try:
+        url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
+
+        html = requests.get(
+            url,
+            timeout=8,
+            headers={
+                "User-Agent":
+                "Mozilla/5.0"
+            }
+        ).text.lower()
+
+        if "szerdától" in html:
+            day = "Szerdától"
+        elif "péntektől" in html:
+            day = "Péntektől"
+        else:
+            day = "Hamarosan"
+
+        up = re.findall(
+            r'(\d+)\s*ft.*drág',
+            html
+        )
+
+        down = re.findall(
+            r'(\d+)\s*ft.*csökken',
+            html
+        )
+
+        if up:
+            return f"⚠️ {day} várható drágulás (+{up[0]} Ft)"
+
+        if down:
+            return f"📉 {day} várható csökkenés (-{down[0]} Ft)"
+
+    except:
+        pass
+
+    return "ℹ️ Nincs friss árváltozás"
 
 
-# -------------------------------------------------
-# STATIONS
-# -------------------------------------------------
+# ======================================================
+# VALÓS KUTAK OSM-ből
+# ======================================================
+
+def fetch_real_stations(lat, lon):
+
+    overpass_url = \
+        "https://overpass-api.de/api/interpreter"
+
+    query = f"""
+    [out:json][timeout:25];
+    (
+      node["amenity"="fuel"](around:7000,{lat},{lon});
+      way["amenity"="fuel"](around:7000,{lat},{lon});
+      relation["amenity"="fuel"](around:7000,{lat},{lon});
+    );
+    out center tags;
+    """
+
+    try:
+        res = requests.post(
+            overpass_url,
+            data=query,
+            timeout=30,
+            headers={
+                "User-Agent":
+                "Mozilla/5.0"
+            }
+        )
+
+        data = res.json()
+
+        return data.get(
+            "elements",
+            []
+        )
+
+    except:
+        return []
+
+
+# ======================================================
+# API
+# ======================================================
+
 @app.route("/stations")
 def stations():
 
-    lat = request.args.get("lat", default=47.4979, type=float)
-    lon = request.args.get("lon", default=19.0402, type=float)
-
-    avg_benzin, avg_diesel = get_average_prices()
-    radar = get_change_info()
-
-    geo_url = (
-        f"https://api.geoapify.com/v2/places?"
-        f"categories=service.vehicle.fuel"
-        f"&filter=circle:{lon},{lat},5000"
-        f"&limit=25"
-        f"&apiKey={API_KEY}"
+    lat = float(
+        request.args.get(
+            "lat",
+            47.4979
+        )
     )
 
-    try:
-        r = requests.get(geo_url, timeout=20)
-        data = r.json()
+    lon = float(
+        request.args.get(
+            "lon",
+            19.0402
+        )
+    )
 
-        stations = []
+    avg95 = scrape_average_price()
 
-        for item in data["features"]:
+    elements = fetch_real_stations(
+        lat,
+        lon
+    )
 
-            p = item["properties"]
+    result = []
 
-            name = p.get("name", "Benzinkút")
-            street = p.get("street", "")
-            number = p.get("housenumber", "")
+    for item in elements:
 
-            full = name
+        tags = item.get(
+            "tags",
+            {}
+        )
 
-            if street:
-                full += ", " + street
+        name = tags.get(
+            "name",
+            "Benzinkút"
+        )
 
-            if number:
-                full += " " + number
+        brand = extract_brand(name)
 
-            alat = p["lat"]
-            alon = p["lon"]
+        if "lat" in item:
+            s_lat = item["lat"]
+            s_lon = item["lon"]
+        else:
+            center = item.get(
+                "center",
+                {}
+            )
+            s_lat = center.get("lat")
+            s_lon = center.get("lon")
 
-            dist = distance_km(lat, lon, alat, alon)
+        if s_lat is None:
+            continue
 
-            brand = detect_brand(name)
+        distance = haversine(
+            lat, lon,
+            s_lat, s_lon
+        )
 
-            price = price_by_brand(avg_benzin, brand)
-
-            stations.append({
-                "name": full,
-                "brand": brand,
-                "fuelType": "95 Benzin",
-                "price": price,
-                "lat": alat,
-                "lon": alon,
-                "distance": round(dist, 2)
-            })
-
-        stations.sort(key=lambda x: x["distance"])
-
-        return jsonify({
-            "radar": radar,
-            "average95": avg_benzin,
-            "averageDiesel": avg_diesel,
-            "stations": stations
+        result.append({
+            "name": name,
+            "brand": brand,
+            "fuelType": "95 Benzin",
+            "price": estimated_price(
+                brand,
+                avg95
+            ),
+            "lat": s_lat,
+            "lon": s_lon,
+            "distance": distance
         })
 
-    except Exception as e:
+    result.sort(
+        key=lambda x:
+        x["distance"]
+    )
 
-        return jsonify({
-            "radar": "⚠️ Térképszerver nem elérhető",
-            "stations": []
-        })
+    result = result[:30]
+
+    return jsonify({
+        "average95": avg95,
+        "averageDiesel": avg95 + 30,
+        "radar": get_radar(),
+        "stations": result
+    })
 
 
-# -------------------------------------------------
+# ======================================================
+
+@app.route("/")
+def home():
+    return "Radar Plus REAL backend OK"
+
+
+# ======================================================
+
 if __name__ == "__main__":
-    app.run()
+    app.run(
+        host="0.0.0.0",
+        port=10000
+    )
