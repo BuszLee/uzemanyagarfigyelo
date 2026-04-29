@@ -18,7 +18,10 @@ CORS(app)
 # CONFIG
 # ==================================================
 
-API_KEY = os.getenv("GEOAPIFY_KEY", "fdfd01a4bf2748849f763d1efee731dd")
+API_KEY = os.getenv(
+    "GEOAPIFY_KEY",
+    "fdfd01a4bf2748849f763d1efee731dd"
+)
 
 REQUEST_TIMEOUT = 12
 SEARCH_RADIUS_M = 7000
@@ -102,8 +105,12 @@ def clean_address(address, brand):
 
     text = address
 
-    text = re.sub(rf"^{brand},\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^[^,]+,\s*", "", text)
+    text = re.sub(
+        rf"^{brand},\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
 
     return text.strip()
 
@@ -113,73 +120,78 @@ def clean_address(address, brand):
 # ==================================================
 
 def parse_day(text):
-    mapping = {
-        "hétfőn": "Hétfőtől",
-        "kedden": "Keddtől",
-        "szerdán": "Szerdától",
-        "csütörtökön": "Csütörtöktől",
-        "pénteken": "Péntektől",
-        "szombaton": "Szombattól",
-        "vasárnap": "Vasárnaptól",
+    t = text.lower().replace("\n", " ").replace("\r", " ")
 
-        "hétfőtől": "Hétfőtől",
-        "keddtől": "Keddtől",
-        "szerdától": "Szerdától",
-        "csütörtöktől": "Csütörtöktől",
-        "péntektől": "Péntektől",
-        "szombattól": "Szombattól",
-        "vasárnaptól": "Vasárnaptól",
-    }
+    days = [
+        ("hétfő", "Hétfőtől"),
+        ("kedd", "Keddtől"),
+        ("szerda", "Szerdától"),
+        ("csütörtök", "Csütörtöktől"),
+        ("péntek", "Péntektől"),
+        ("szombat", "Szombattól"),
+        ("vasárnap", "Vasárnaptól"),
+    ]
 
-    for key, value in mapping.items():
-        if key in text:
+    for key, value in days:
+        if key in t:
             return value
 
     return "Hamarosan"
 
 
 def parse_direction(text):
-    if any(word in text for word in [
+    t = text.lower()
+
+    if any(word in t for word in [
         "csökken",
         "mérséklődik",
+        "árcsökkenés",
         "olcsóbb",
         "csökkentés"
     ]):
-        return "-"
+        return "-", "csökkenés"
 
-    return "+"
+    return "+", "drágulás"
 
 
 def parse_changes(text):
-    sign = parse_direction(text)
+    t = text.lower()
+
+    sign, trend = parse_direction(t)
 
     radar95 = "0 Ft"
     radarDiesel = "0 Ft"
 
-    # 5-5 forinttal
-    same = re.search(r"(\d+)\s*-\s*(\d+)\s*forint", text)
+    # pl: 5-5 forinttal
+    same = re.search(
+        r"(\d+)\s*-\s*(\d+)\s*forint",
+        t
+    )
+
     if same:
         radar95 = f"{sign}{same.group(1)} Ft"
         radarDiesel = f"{sign}{same.group(2)} Ft"
-        return radar95, radarDiesel
+        return radar95, radarDiesel, trend
 
-    # azonos mértékben nő ... 5 forinttal
-    common = re.search(r"azonos mértékben.*?(\d+)\s*forint", text)
+    # pl: azonos mértékben nő ... 5 forinttal
+    common = re.search(
+        r"azonos mértékben.*?(\d+)\s*forint",
+        t
+    )
+
     if common:
         radar95 = f"{sign}{common.group(1)} Ft"
         radarDiesel = f"{sign}{common.group(1)} Ft"
-        return radar95, radarDiesel
+        return radar95, radarDiesel, trend
 
-    # külön benzin
     benzin = re.search(
         r"benzin.*?(\d+)\s*forint",
-        text
+        t
     )
 
-    # külön diesel/gázolaj
     diesel = re.search(
         r"(gázolaj|diesel).*?(\d+)\s*forint",
-        text
+        t
     )
 
     if benzin:
@@ -188,17 +200,20 @@ def parse_changes(text):
     if diesel:
         radarDiesel = f"{sign}{diesel.group(2)} Ft"
 
-    return radar95, radarDiesel
+    return radar95, radarDiesel, trend
 
 
 # ==================================================
-# FUEL SCRAPER
+# FUEL INFO
 # ==================================================
 
 def get_fuel_info():
     now = time.time()
 
-    if fuel_cache["data"] and now - fuel_cache["time"] < CACHE_SECONDS:
+    if (
+        fuel_cache["data"]
+        and now - fuel_cache["time"] < CACHE_SECONDS
+    ):
         return fuel_cache["data"]
 
     average95 = 674
@@ -207,6 +222,7 @@ def get_fuel_info():
     radarDay = "Hamarosan"
     radar95 = "0 Ft"
     radarDiesel = "0 Ft"
+    radarTrend = "nincs változás"
 
     try:
         url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
@@ -214,13 +230,15 @@ def get_fuel_info():
         r = requests.get(
             url,
             timeout=REQUEST_TIMEOUT,
-            headers={"User-Agent": "Mozilla/5.0"}
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
         )
 
         r.encoding = "utf-8"
+
         text = r.text.lower()
 
-        # átlagárak
         benzin_avg = re.search(
             r"95.*?:\s*(\d{3})\s*ft",
             text
@@ -232,14 +250,19 @@ def get_fuel_info():
         )
 
         if benzin_avg:
-            average95 = int(benzin_avg.group(1))
+            average95 = int(
+                benzin_avg.group(1)
+            )
 
         if diesel_avg:
-            averageDiesel = int(diesel_avg.group(1))
+            averageDiesel = int(
+                diesel_avg.group(1)
+            )
 
         radarDay = parse_day(text)
 
-        radar95, radarDiesel = parse_changes(text)
+        radar95, radarDiesel, radarTrend = \
+            parse_changes(text)
 
     except Exception:
         pass
@@ -247,9 +270,11 @@ def get_fuel_info():
     result = {
         "average95": average95,
         "averageDiesel": averageDiesel,
+
         "radarDay": radarDay,
         "radar95": radar95,
-        "radarDiesel": radarDiesel
+        "radarDiesel": radarDiesel,
+        "radarTrend": radarTrend
     }
 
     fuel_cache["time"] = now
@@ -270,8 +295,17 @@ def home():
 @app.route("/stations")
 def stations():
 
-    lat = request.args.get("lat", default=47.4979, type=float)
-    lon = request.args.get("lon", default=19.0402, type=float)
+    lat = request.args.get(
+        "lat",
+        default=47.4979,
+        type=float
+    )
+
+    lon = request.args.get(
+        "lon",
+        default=19.0402,
+        type=float
+    )
 
     fuel = get_fuel_info()
 
@@ -286,22 +320,38 @@ def stations():
     stations = []
 
     try:
-        r = requests.get(url, timeout=REQUEST_TIMEOUT)
+        r = requests.get(
+            url,
+            timeout=REQUEST_TIMEOUT
+        )
+
         data = r.json()
 
-        for item in data.get("features", []):
+        for item in data.get(
+            "features",
+            []
+        ):
 
-            p = item.get("properties", {})
+            p = item.get(
+                "properties",
+                {}
+            )
 
             station_lat = p.get("lat")
             station_lon = p.get("lon")
 
-            if station_lat is None or station_lon is None:
+            if station_lat is None \
+               or station_lon is None:
                 continue
 
-            raw_name = p.get("name", "Benzinkút")
+            raw_name = p.get(
+                "name",
+                "Benzinkút"
+            )
 
-            brand = detect_brand(raw_name)
+            brand = detect_brand(
+                raw_name
+            )
 
             raw_address = (
                 p.get("formatted")
@@ -336,15 +386,31 @@ def stations():
                 "distance": distance_km
             })
 
-        stations.sort(key=lambda x: x["distance"])
+        stations.sort(
+            key=lambda x: x["distance"]
+        )
 
         return jsonify({
             "status": "ok",
-            "average95": fuel["average95"],
-            "averageDiesel": fuel["averageDiesel"],
-            "radarDay": fuel["radarDay"],
-            "radar95": fuel["radar95"],
-            "radarDiesel": fuel["radarDiesel"],
+
+            "average95":
+                fuel["average95"],
+
+            "averageDiesel":
+                fuel["averageDiesel"],
+
+            "radarDay":
+                fuel["radarDay"],
+
+            "radar95":
+                fuel["radar95"],
+
+            "radarDiesel":
+                fuel["radarDiesel"],
+
+            "radarTrend":
+                fuel["radarTrend"],
+
             "stations": stations
         })
 
@@ -353,11 +419,25 @@ def stations():
         return jsonify({
             "status": "error",
             "message": str(e),
-            "average95": fuel["average95"],
-            "averageDiesel": fuel["averageDiesel"],
-            "radarDay": fuel["radarDay"],
-            "radar95": fuel["radar95"],
-            "radarDiesel": fuel["radarDiesel"],
+
+            "average95":
+                fuel["average95"],
+
+            "averageDiesel":
+                fuel["averageDiesel"],
+
+            "radarDay":
+                fuel["radarDay"],
+
+            "radar95":
+                fuel["radar95"],
+
+            "radarDiesel":
+                fuel["radarDiesel"],
+
+            "radarTrend":
+                fuel["radarTrend"],
+
             "stations": []
         })
 
@@ -369,5 +449,10 @@ def stations():
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000))
+        port=int(
+            os.environ.get(
+                "PORT",
+                5000
+            )
+        )
     )
