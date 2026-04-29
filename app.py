@@ -6,6 +6,7 @@ import requests
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from bs4 import BeautifulSoup
 
 # ==================================================
 # APP
@@ -48,10 +49,10 @@ def haversine_km(lat1, lon1, lat2, lon2):
     dlon = math.radians(lon2 - lon1)
 
     a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
+        math.sin(dlat / 2) ** 2 +
+        math.cos(math.radians(lat1)) *
+        math.cos(math.radians(lat2)) *
+        math.sin(dlon / 2) ** 2
     )
 
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
@@ -103,7 +104,7 @@ def clean_address(address, brand):
     if not address:
         return "Ismeretlen cím"
 
-    text = address
+    text = address.strip()
 
     text = re.sub(
         rf"^{brand},\s*",
@@ -112,15 +113,15 @@ def clean_address(address, brand):
         flags=re.IGNORECASE
     )
 
-    return text.strip()
+    return text
 
 
 # ==================================================
-# RADAR PARSER
+# RADAR
 # ==================================================
 
 def parse_day(text):
-    t = text.lower().replace("\n", " ").replace("\r", " ")
+    t = text.lower()
 
     days = [
         ("hétfő", "Hétfőtől"),
@@ -144,8 +145,8 @@ def parse_direction(text):
 
     if any(word in t for word in [
         "csökken",
-        "mérséklődik",
         "árcsökkenés",
+        "mérséklődik",
         "olcsóbb",
         "csökkentés"
     ]):
@@ -162,7 +163,7 @@ def parse_changes(text):
     radar95 = "0 Ft"
     radarDiesel = "0 Ft"
 
-    # pl: 5-5 forinttal
+    # pl 5-5 forinttal
     same = re.search(
         r"(\d+)\s*-\s*(\d+)\s*forint",
         t
@@ -173,7 +174,7 @@ def parse_changes(text):
         radarDiesel = f"{sign}{same.group(2)} Ft"
         return radar95, radarDiesel, trend
 
-    # pl: azonos mértékben nő ... 5 forinttal
+    # pl azonos mértékben ... 5 forinttal
     common = re.search(
         r"azonos mértékben.*?(\d+)\s*forint",
         t
@@ -184,11 +185,13 @@ def parse_changes(text):
         radarDiesel = f"{sign}{common.group(1)} Ft"
         return radar95, radarDiesel, trend
 
+    # benzin külön
     benzin = re.search(
         r"benzin.*?(\d+)\s*forint",
         t
     )
 
+    # diesel külön
     diesel = re.search(
         r"(gázolaj|diesel).*?(\d+)\s*forint",
         t
@@ -204,15 +207,15 @@ def parse_changes(text):
 
 
 # ==================================================
-# FUEL INFO
+# SCRAPER
 # ==================================================
 
 def get_fuel_info():
     now = time.time()
 
     if (
-        fuel_cache["data"]
-        and now - fuel_cache["time"] < CACHE_SECONDS
+        fuel_cache["data"] and
+        now - fuel_cache["time"] < CACHE_SECONDS
     ):
         return fuel_cache["data"]
 
@@ -222,7 +225,7 @@ def get_fuel_info():
     radarDay = "Hamarosan"
     radar95 = "0 Ft"
     radarDiesel = "0 Ft"
-    radarTrend = "nincs változás"
+    radarTrend = "nincs"
 
     try:
         url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
@@ -237,8 +240,18 @@ def get_fuel_info():
 
         r.encoding = "utf-8"
 
-        text = r.text.lower()
+        # >>> JAVÍTOTT SZÖVEGKINYERÉS <<<
+        soup = BeautifulSoup(
+            r.text,
+            "html.parser"
+        )
 
+        text = soup.get_text(
+            " ",
+            strip=True
+        ).lower()
+
+        # átlagárak
         benzin_avg = re.search(
             r"95.*?:\s*(\d{3})\s*ft",
             text
@@ -264,13 +277,12 @@ def get_fuel_info():
         radar95, radarDiesel, radarTrend = \
             parse_changes(text)
 
-    except Exception:
-        pass
+    except Exception as e:
+        print("SCRAPER ERROR:", e)
 
     result = {
         "average95": average95,
         "averageDiesel": averageDiesel,
-
         "radarDay": radarDay,
         "radar95": radar95,
         "radarDiesel": radarDiesel,
@@ -340,8 +352,7 @@ def stations():
             station_lat = p.get("lat")
             station_lon = p.get("lon")
 
-            if station_lat is None \
-               or station_lon is None:
+            if station_lat is None or station_lon is None:
                 continue
 
             raw_name = p.get(
@@ -349,9 +360,7 @@ def stations():
                 "Benzinkút"
             )
 
-            brand = detect_brand(
-                raw_name
-            )
+            brand = detect_brand(raw_name)
 
             raw_address = (
                 p.get("formatted")
@@ -393,23 +402,13 @@ def stations():
         return jsonify({
             "status": "ok",
 
-            "average95":
-                fuel["average95"],
+            "average95": fuel["average95"],
+            "averageDiesel": fuel["averageDiesel"],
 
-            "averageDiesel":
-                fuel["averageDiesel"],
-
-            "radarDay":
-                fuel["radarDay"],
-
-            "radar95":
-                fuel["radar95"],
-
-            "radarDiesel":
-                fuel["radarDiesel"],
-
-            "radarTrend":
-                fuel["radarTrend"],
+            "radarDay": fuel["radarDay"],
+            "radar95": fuel["radar95"],
+            "radarDiesel": fuel["radarDiesel"],
+            "radarTrend": fuel["radarTrend"],
 
             "stations": stations
         })
@@ -420,23 +419,13 @@ def stations():
             "status": "error",
             "message": str(e),
 
-            "average95":
-                fuel["average95"],
+            "average95": fuel["average95"],
+            "averageDiesel": fuel["averageDiesel"],
 
-            "averageDiesel":
-                fuel["averageDiesel"],
-
-            "radarDay":
-                fuel["radarDay"],
-
-            "radar95":
-                fuel["radar95"],
-
-            "radarDiesel":
-                fuel["radarDiesel"],
-
-            "radarTrend":
-                fuel["radarTrend"],
+            "radarDay": fuel["radarDay"],
+            "radar95": fuel["radar95"],
+            "radarDiesel": fuel["radarDiesel"],
+            "radarTrend": fuel["radarTrend"],
 
             "stations": []
         })
