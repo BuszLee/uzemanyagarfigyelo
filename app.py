@@ -7,16 +7,16 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-# --------------------------------------------------
+# ==================================================
 # APP
-# --------------------------------------------------
+# ==================================================
 
 app = Flask(__name__)
 CORS(app)
 
-# --------------------------------------------------
+# ==================================================
 # CONFIG
-# --------------------------------------------------
+# ==================================================
 
 API_KEY = os.getenv("GEOAPIFY_KEY", "fdfd01a4bf2748849f763d1efee731dd")
 
@@ -25,18 +25,18 @@ SEARCH_RADIUS_M = 7000
 SEARCH_LIMIT = 30
 CACHE_SECONDS = 300
 
-# --------------------------------------------------
-# SIMPLE MEMORY CACHE
-# --------------------------------------------------
+# ==================================================
+# CACHE
+# ==================================================
 
 fuel_cache = {
     "time": 0,
     "data": None
 }
 
-# --------------------------------------------------
+# ==================================================
 # HELPERS
-# --------------------------------------------------
+# ==================================================
 
 def haversine_km(lat1, lon1, lat2, lon2):
     r = 6371.0
@@ -52,6 +52,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
     )
 
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
     return round(r * c, 2)
 
 
@@ -65,8 +66,8 @@ def detect_brand(name):
         "mol": "MOL",
         "omv": "OMV",
         "shell": "SHELL",
-        "lukoil": "LUKOIL",
         "orlen": "ORLEN",
+        "lukoil": "LUKOIL",
         "avia": "AVIA",
         "eni": "ENI",
         "agip": "AGIP",
@@ -95,9 +96,104 @@ def estimate_station_price(avg95, avgdiesel, brand):
     return avg95 + extra
 
 
-# --------------------------------------------------
-# FUEL INFO SCRAPER
-# --------------------------------------------------
+def clean_address(address, brand):
+    if not address:
+        return "Ismeretlen cím"
+
+    text = address
+
+    text = re.sub(rf"^{brand},\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^[^,]+,\s*", "", text)
+
+    return text.strip()
+
+
+# ==================================================
+# RADAR PARSER
+# ==================================================
+
+def parse_day(text):
+    mapping = {
+        "hétfőn": "Hétfőtől",
+        "kedden": "Keddtől",
+        "szerdán": "Szerdától",
+        "csütörtökön": "Csütörtöktől",
+        "pénteken": "Péntektől",
+        "szombaton": "Szombattól",
+        "vasárnap": "Vasárnaptól",
+
+        "hétfőtől": "Hétfőtől",
+        "keddtől": "Keddtől",
+        "szerdától": "Szerdától",
+        "csütörtöktől": "Csütörtöktől",
+        "péntektől": "Péntektől",
+        "szombattól": "Szombattól",
+        "vasárnaptól": "Vasárnaptól",
+    }
+
+    for key, value in mapping.items():
+        if key in text:
+            return value
+
+    return "Hamarosan"
+
+
+def parse_direction(text):
+    if any(word in text for word in [
+        "csökken",
+        "mérséklődik",
+        "olcsóbb",
+        "csökkentés"
+    ]):
+        return "-"
+
+    return "+"
+
+
+def parse_changes(text):
+    sign = parse_direction(text)
+
+    radar95 = "0 Ft"
+    radarDiesel = "0 Ft"
+
+    # 5-5 forinttal
+    same = re.search(r"(\d+)\s*-\s*(\d+)\s*forint", text)
+    if same:
+        radar95 = f"{sign}{same.group(1)} Ft"
+        radarDiesel = f"{sign}{same.group(2)} Ft"
+        return radar95, radarDiesel
+
+    # azonos mértékben nő ... 5 forinttal
+    common = re.search(r"azonos mértékben.*?(\d+)\s*forint", text)
+    if common:
+        radar95 = f"{sign}{common.group(1)} Ft"
+        radarDiesel = f"{sign}{common.group(1)} Ft"
+        return radar95, radarDiesel
+
+    # külön benzin
+    benzin = re.search(
+        r"benzin.*?(\d+)\s*forint",
+        text
+    )
+
+    # külön diesel/gázolaj
+    diesel = re.search(
+        r"(gázolaj|diesel).*?(\d+)\s*forint",
+        text
+    )
+
+    if benzin:
+        radar95 = f"{sign}{benzin.group(1)} Ft"
+
+    if diesel:
+        radarDiesel = f"{sign}{diesel.group(2)} Ft"
+
+    return radar95, radarDiesel
+
+
+# ==================================================
+# FUEL SCRAPER
+# ==================================================
 
 def get_fuel_info():
     now = time.time()
@@ -107,6 +203,7 @@ def get_fuel_info():
 
     average95 = 674
     averageDiesel = 705
+
     radarDay = "Hamarosan"
     radar95 = "0 Ft"
     radarDiesel = "0 Ft"
@@ -123,30 +220,26 @@ def get_fuel_info():
         r.encoding = "utf-8"
         text = r.text.lower()
 
-        prices = re.findall(r"(\d{3})\s*ft", text)
-
-        if len(prices) >= 2:
-            average95 = int(prices[0])
-            averageDiesel = int(prices[1])
-
-        # nap keresés
-        day_match = re.search(
-            r"(hétfőtől|keddtől|szerdától|csütörtöktől|péntektől|szombattól|vasárnaptól)",
+        # átlagárak
+        benzin_avg = re.search(
+            r"95.*?:\s*(\d{3})\s*ft",
             text
         )
 
-        if day_match:
-            radarDay = day_match.group(1).capitalize()
+        diesel_avg = re.search(
+            r"gázolaj.*?:\s*(\d{3})\s*ft",
+            text
+        )
 
-        # benzin változás
-        benzin = re.search(r"benzin.*?(\d+)\s*forint", text)
-        diesel = re.search(r"(gázolaj|diesel).*?(\d+)\s*forint", text)
+        if benzin_avg:
+            average95 = int(benzin_avg.group(1))
 
-        if benzin:
-            radar95 = f"+{benzin.group(1)} Ft"
+        if diesel_avg:
+            averageDiesel = int(diesel_avg.group(1))
 
-        if diesel:
-            radarDiesel = f"+{diesel.group(2)} Ft"
+        radarDay = parse_day(text)
+
+        radar95, radarDiesel = parse_changes(text)
 
     except Exception:
         pass
@@ -165,9 +258,9 @@ def get_fuel_info():
     return result
 
 
-# --------------------------------------------------
+# ==================================================
 # ROUTES
-# --------------------------------------------------
+# ==================================================
 
 @app.route("/")
 def home():
@@ -176,6 +269,7 @@ def home():
 
 @app.route("/stations")
 def stations():
+
     lat = request.args.get("lat", default=47.4979, type=float)
     lon = request.args.get("lon", default=19.0402, type=float)
 
@@ -196,6 +290,7 @@ def stations():
         data = r.json()
 
         for item in data.get("features", []):
+
             p = item.get("properties", {})
 
             station_lat = p.get("lat")
@@ -205,16 +300,27 @@ def stations():
                 continue
 
             raw_name = p.get("name", "Benzinkút")
+
             brand = detect_brand(raw_name)
 
-            address = (
+            raw_address = (
                 p.get("formatted")
                 or p.get("address_line2")
                 or p.get("address_line1")
                 or "Ismeretlen cím"
             )
 
-            distance_km = haversine_km(lat, lon, station_lat, station_lon)
+            address = clean_address(
+                raw_address,
+                brand
+            )
+
+            distance_km = haversine_km(
+                lat,
+                lon,
+                station_lat,
+                station_lon
+            )
 
             stations.append({
                 "name": f"{brand}, {address}",
@@ -243,6 +349,7 @@ def stations():
         })
 
     except Exception as e:
+
         return jsonify({
             "status": "error",
             "message": str(e),
@@ -255,9 +362,9 @@ def stations():
         })
 
 
-# --------------------------------------------------
+# ==================================================
 # MAIN
-# --------------------------------------------------
+# ==================================================
 
 if __name__ == "__main__":
     app.run(
