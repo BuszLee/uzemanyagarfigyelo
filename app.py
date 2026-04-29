@@ -1,107 +1,266 @@
 import os
 import re
 import math
+import time
 import requests
-from flask import Flask, jsonify, request, make_response
+
+from flask import Flask, jsonify, request
 from flask_cors import CORS
-from bs4 import BeautifulSoup
+
+# --------------------------------------------------
+# APP
+# --------------------------------------------------
 
 app = Flask(__name__)
-# A lehető legengedékenyebb CORS beállítás
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
 
-API_KEY = "fdfd01a4bf2748849f763d1efee731dd"
+# --------------------------------------------------
+# CONFIG
+# --------------------------------------------------
 
-# --- Távolság kalkulátor maradt a régi, bevált ---
-def get_distance_result(lat1, lon1, lat2, lon2):
-    R = 6371.0
+API_KEY = os.getenv("GEOAPIFY_KEY", "fdfd01a4bf2748849f763d1efee731dd")
+
+REQUEST_TIMEOUT = 12
+SEARCH_RADIUS_M = 7000
+SEARCH_LIMIT = 30
+CACHE_SECONDS = 300
+
+# --------------------------------------------------
+# SIMPLE MEMORY CACHE
+# --------------------------------------------------
+
+fuel_cache = {
+    "time": 0,
+    "data": None
+}
+
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    distance_km = R * c
-    return f"{int(distance_km * 1000)} m" if distance_km < 1 else f"{round(distance_km, 2)} km"
+    return round(r * c, 2)
+
+
+def detect_brand(name):
+    if not name:
+        return "Benzinkút"
+
+    n = name.lower()
+
+    brands = {
+        "mol": "MOL",
+        "omv": "OMV",
+        "shell": "SHELL",
+        "lukoil": "LUKOIL",
+        "orlen": "ORLEN",
+        "avia": "AVIA",
+        "eni": "ENI",
+        "agip": "AGIP",
+        "auchan": "AUCHAN",
+        "tesco": "TESCO"
+    }
+
+    for key, value in brands.items():
+        if key in n:
+            return value
+
+    return "Benzinkút"
+
+
+def estimate_station_price(avg95, avgdiesel, brand):
+    extra = {
+        "OMV": 6,
+        "SHELL": 8,
+        "MOL": 3,
+        "AUCHAN": -5,
+        "TESCO": -4,
+        "ORLEN": 2,
+        "LUKOIL": 1
+    }.get(brand, 0)
+
+    return avg95 + extra
+
+
+# --------------------------------------------------
+# FUEL INFO SCRAPER
+# --------------------------------------------------
 
 def get_fuel_info():
+    now = time.time()
+
+    if fuel_cache["data"] and now - fuel_cache["time"] < CACHE_SECONDS:
+        return fuel_cache["data"]
+
+    average95 = 674
+    averageDiesel = 705
+    radarDay = "Hamarosan"
+    radar95 = "0 Ft"
+    radarDiesel = "0 Ft"
+
     try:
         url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
-        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        r.encoding = 'utf-8'
-        content = r.text.lower()
-        nums = re.findall(r'(\d{3})\s*ft', content)
-        b_avg = int(nums[0]) if len(nums) >= 1 else 674
-        d_avg = int(nums[1]) if len(nums) >= 2 else 705
-        
-        b_valtozas = re.search(r'benzin.*?(\d+)\s*forint', content)
-        d_valtozas = re.search(r'(?:gázolaj|diesel).*?(\d+)\s*forint', content)
-        
-        type_w = "drágulás" if "emelkedik" in content or "nő" in content else "csökkenés"
-        emoji = "⚠️" if "emelkedik" in content else "📉"
-        
-        if b_valtozas and d_valtozas:
-            radar = f"{emoji} Várható {type_w}: B: +{b_valtozas.group(1)} Ft | D: +{d_valtozas.group(1)} Ft"
-        elif b_valtozas:
-            radar = f"{emoji} Benzin {type_w} (+{b_valtozas.group(1)} Ft)"
-        else:
-            radar = "✔️ Nincs friss árváltozás"
-        return b_avg, d_avg, radar
-    except:
-        return 674, 705, "⚠️ Árinfó nem elérhető"
 
-@app.after_request
-def add_header(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Origin-Allow-Headers'] = 'Content-Type,Authorization'
-    response.headers['Access-Origin-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
-    return response
+        r = requests.get(
+            url,
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+
+        r.encoding = "utf-8"
+        text = r.text.lower()
+
+        prices = re.findall(r"(\d{3})\s*ft", text)
+
+        if len(prices) >= 2:
+            average95 = int(prices[0])
+            averageDiesel = int(prices[1])
+
+        # nap keresés
+        day_match = re.search(
+            r"(hétfőtől|keddtől|szerdától|csütörtöktől|péntektől|szombattól|vasárnaptól)",
+            text
+        )
+
+        if day_match:
+            radarDay = day_match.group(1).capitalize()
+
+        # benzin változás
+        benzin = re.search(r"benzin.*?(\d+)\s*forint", text)
+        diesel = re.search(r"(gázolaj|diesel).*?(\d+)\s*forint", text)
+
+        if benzin:
+            radar95 = f"+{benzin.group(1)} Ft"
+
+        if diesel:
+            radarDiesel = f"+{diesel.group(2)} Ft"
+
+    except Exception:
+        pass
+
+    result = {
+        "average95": average95,
+        "averageDiesel": averageDiesel,
+        "radarDay": radarDay,
+        "radar95": radar95,
+        "radarDiesel": radarDiesel
+    }
+
+    fuel_cache["time"] = now
+    fuel_cache["data"] = result
+
+    return result
+
+
+# --------------------------------------------------
+# ROUTES
+# --------------------------------------------------
 
 @app.route("/")
 def home():
-    return "API ONLINE"
+    return "UZEMANYAGARFIGYELO API ONLINE"
+
 
 @app.route("/stations")
 def stations():
-    lat = request.args.get("lat", default=47.6829, type=float)
-    lon = request.args.get("lon", default=16.5988, type=float)
-    b_avg, d_avg, radar = get_fuel_info()
+    lat = request.args.get("lat", default=47.4979, type=float)
+    lon = request.args.get("lon", default=19.0402, type=float)
 
-    geo_url = f"https://api.geoapify.com/v2/places?categories=service.vehicle.fuel&filter=circle:{lon},{lat},5000&limit=30&apiKey={API_KEY}"
+    fuel = get_fuel_info()
+
+    url = (
+        "https://api.geoapify.com/v2/places"
+        f"?categories=service.vehicle.fuel"
+        f"&filter=circle:{lon},{lat},{SEARCH_RADIUS_M}"
+        f"&limit={SEARCH_LIMIT}"
+        f"&apiKey={API_KEY}"
+    )
+
+    stations = []
 
     try:
-        r = requests.get(geo_url, timeout=15)
+        r = requests.get(url, timeout=REQUEST_TIMEOUT)
         data = r.json()
-        output = []
-        for item in data.get("features", []):
-            p = item["properties"]
-            name = p.get("name", "Benzinkút")
-            brand = "MOL" if "mol" in name.lower() else "OMV" if "omv" in name.lower() else "SHELL" if "shell" in name.lower() else "Benzinkút"
-            addr = p.get("address_line2", "Ismeretlen cím")
-            alat, alon = p["lat"], p["lon"]
-            
-            # Ez a rész felel a rendezésért
-            raw_dist = math.sqrt((lat-alat)**2 + (lon-alon)**2)
 
-            output.append({
-                "name": f"{brand} - {addr}",
+        for item in data.get("features", []):
+            p = item.get("properties", {})
+
+            station_lat = p.get("lat")
+            station_lon = p.get("lon")
+
+            if station_lat is None or station_lon is None:
+                continue
+
+            raw_name = p.get("name", "Benzinkút")
+            brand = detect_brand(raw_name)
+
+            address = (
+                p.get("formatted")
+                or p.get("address_line2")
+                or p.get("address_line1")
+                or "Ismeretlen cím"
+            )
+
+            distance_km = haversine_km(lat, lon, station_lat, station_lon)
+
+            stations.append({
+                "name": f"{brand}, {address}",
                 "brand": brand,
                 "fuelType": "95 Benzin",
-                "price": b_avg + (5 if brand == "OMV" else 7 if brand == "SHELL" else 0),
-                "lat": alat,
-                "lon": alon,
-                "distance": get_distance_result(lat, lon, alat, alon),
-                "raw_dist": raw_dist
+                "price": estimate_station_price(
+                    fuel["average95"],
+                    fuel["averageDiesel"],
+                    brand
+                ),
+                "lat": station_lat,
+                "lon": station_lon,
+                "distance": distance_km
             })
-        
-        output.sort(key=lambda x: x["raw_dist"])
-        
+
+        stations.sort(key=lambda x: x["distance"])
+
         return jsonify({
-            "radar": radar,
-            "average95": b_avg,
-            "averageDiesel": d_avg,
-            "stations": output
+            "status": "ok",
+            "average95": fuel["average95"],
+            "averageDiesel": fuel["averageDiesel"],
+            "radarDay": fuel["radarDay"],
+            "radar95": fuel["radar95"],
+            "radarDiesel": fuel["radarDiesel"],
+            "stations": stations
         })
+
     except Exception as e:
-        return jsonify({"error": str(e), "stations": []})
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "average95": fuel["average95"],
+            "averageDiesel": fuel["averageDiesel"],
+            "radarDay": fuel["radarDay"],
+            "radar95": fuel["radar95"],
+            "radarDiesel": fuel["radarDiesel"],
+            "stations": []
+        })
+
+
+# --------------------------------------------------
+# MAIN
+# --------------------------------------------------
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000))
+    )
