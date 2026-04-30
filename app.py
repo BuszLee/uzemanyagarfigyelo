@@ -7,39 +7,36 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-# ==================================================
+# --------------------------------------------------
 # APP
-# ==================================================
+# --------------------------------------------------
 
 app = Flask(__name__)
 CORS(app)
 
-# ==================================================
+# --------------------------------------------------
 # CONFIG
-# ==================================================
+# --------------------------------------------------
 
-API_KEY = os.getenv(
-    "GEOAPIFY_KEY",
-    "fdfd01a4bf2748849f763d1efee731dd"
-)
+API_KEY = os.getenv("GEOAPIFY_KEY", "fdfd01a4bf2748849f763d1efee731dd")
 
 REQUEST_TIMEOUT = 12
 SEARCH_RADIUS_M = 7000
 SEARCH_LIMIT = 30
 CACHE_SECONDS = 300
 
-# ==================================================
+# --------------------------------------------------
 # CACHE
-# ==================================================
+# --------------------------------------------------
 
 fuel_cache = {
     "time": 0,
     "data": None
 }
 
-# ==================================================
+# --------------------------------------------------
 # HELPERS
-# ==================================================
+# --------------------------------------------------
 
 def haversine_km(lat1, lon1, lat2, lon2):
     r = 6371.0
@@ -54,17 +51,9 @@ def haversine_km(lat1, lon1, lat2, lon2):
         * math.sin(dlon / 2) ** 2
     )
 
-    c = 2 * math.atan2(
-        math.sqrt(a),
-        math.sqrt(1 - a)
-    )
-
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return round(r * c, 2)
 
-
-# ==================================================
-# BRAND DETECT
-# ==================================================
 
 def detect_brand(name):
     if not name:
@@ -76,16 +65,14 @@ def detect_brand(name):
         "mol": "MOL",
         "omv": "OMV",
         "shell": "SHELL",
-        "orlen": "ORLEN",
         "lukoil": "LUKOIL",
+        "orlen": "ORLEN",
         "avia": "AVIA",
-        "agip": "AGIP",
         "eni": "ENI",
-        "mpetrol": "MPETROL",
-        "fullenergy": "FULLENERGY",
-        "full energy": "FULLENERGY",
+        "agip": "AGIP",
+        "auchan": "AUCHAN",
         "tesco": "TESCO",
-        "auchan": "AUCHAN"
+        "fullenergy": "FULLENERGY"
     }
 
     for key, value in brands.items():
@@ -95,195 +82,92 @@ def detect_brand(name):
     return "Benzinkút"
 
 
-# ==================================================
-# PRICE ESTIMATE
-# ==================================================
-
 def estimate_station_price(avg95, brand):
-    plus = {
+    extra = {
         "OMV": 6,
         "SHELL": 8,
         "MOL": 3,
+        "AUCHAN": -5,
+        "TESCO": -4,
         "ORLEN": 2,
         "LUKOIL": 1,
-        "TESCO": -4,
-        "AUCHAN": -5,
-        "FULLENERGY": 0,
-        "MPETROL": 0
+        "FULLENERGY": 0
     }.get(brand, 0)
 
-    return avg95 + plus
+    return avg95 + extra
 
 
-# ==================================================
-# DAY DETECT
-# ==================================================
-
-def detect_day(text):
-    days = [
-        "hétfőtől",
-        "keddtől",
-        "szerdától",
-        "csütörtöktől",
-        "péntektől",
-        "szombattól",
-        "vasárnaptól"
-    ]
-
-    for d in days:
-        if d in text:
-            return d.capitalize()
-
-    # fallback: holnap / ma
-    if "holnaptól" in text:
-        return "Holnaptól"
-
-    if "mától" in text:
-        return "Mától"
-
-    return "Hamarosan"
-
-
-# ==================================================
-# CHANGE DETECT
-# ==================================================
-
-def detect_change(text, fuel_words):
-    """
-    pozitív / negatív változás keresés
-    """
-
-    for word in fuel_words:
-
-        pattern = (
-            rf"{word}.{{0,120}}?"
-            rf"(\d+)[ -]?(?:forint|ft)"
-        )
-
-        m = re.search(
-            pattern,
-            text,
-            re.S
-        )
-
-        if m:
-            value = m.group(1)
-
-            if any(x in text for x in [
-                "csökken",
-                "mérséklődik",
-                "olcsóbb"
-            ]):
-                return f"-{value} Ft"
-
-            return f"+{value} Ft"
-
-    return "0 Ft"
-
-
-# ==================================================
-# TREND DETECT
-# ==================================================
-
-def detect_trend(text):
-    if any(x in text for x in [
-        "csökken",
-        "mérséklődik",
-        "olcsóbb"
-    ]):
-        return "csökkenés"
-
-    if any(x in text for x in [
-        "emelkedik",
-        "drágul",
-        "nő",
-        "ármelkedés",
-        "áremelkedés"
-    ]):
-        return "drágulás"
-
-    return "változás"
-
-
-# ==================================================
-# FUEL SCRAPER FINAL
-# ==================================================
+# --------------------------------------------------
+# SCRAPER (FIXED)
+# --------------------------------------------------
 
 def get_fuel_info():
     now = time.time()
 
-    if (
-        fuel_cache["data"]
-        and now - fuel_cache["time"] < CACHE_SECONDS
-    ):
+    if fuel_cache["data"] and now - fuel_cache["time"] < CACHE_SECONDS:
         return fuel_cache["data"]
 
     average95 = 680
     averageDiesel = 714
-
     radarDay = "Hamarosan"
     radar95 = "0 Ft"
     radarDiesel = "0 Ft"
-    radarTrend = "változás"
 
     try:
-        url = (
-            "https://holtankoljak.hu/"
-            "uzemanyag_arvaltozasok"
-        )
+        url = "https://holtankoljak.hu/uzemanyag_arvaltozasok"
 
         r = requests.get(
             url,
             timeout=REQUEST_TIMEOUT,
-            headers={
-                "User-Agent":
-                "Mozilla/5.0"
-            }
+            headers={"User-Agent": "Mozilla/5.0"}
         )
 
         r.encoding = "utf-8"
-
         text = r.text.lower()
 
-        # -------------------------
-        # ÁTLAGÁR
-        # -------------------------
+        # ----------------------------------
+        # ÁTLAG ÁRAK
+        # ----------------------------------
+        avg_b = re.search(r"95.*?(\d{3})\s*ft", text)
+        avg_d = re.search(r"gázolaj.*?(\d{3})\s*ft", text)
 
-        m95 = re.search(
-            r"95.*?(\d{3})\s*ft",
-            text,
-            re.S
+        if avg_b:
+            average95 = int(avg_b.group(1))
+
+        if avg_d:
+            averageDiesel = int(avg_d.group(1))
+
+        # ----------------------------------
+        # NAP (csütörtöktől stb.)
+        # ----------------------------------
+        day_match = re.search(
+            r"(hétfőtől|keddtől|szerdától|csütörtöktől|péntektől|szombattól|vasárnaptól)",
+            text
         )
 
-        md = re.search(
-            r"gázolaj.*?(\d{3})\s*ft",
-            text,
-            re.S
+        if day_match:
+            radarDay = day_match.group(1).capitalize()
+
+        # ----------------------------------
+        # VÁLTOZÁS (FIX BUG!!!)
+        # csak "nő/csökken" UTÁNI szám
+        # ----------------------------------
+
+        benzin = re.search(
+            r"benzin[^.]*?(nő|csökken)[^.]*?(\d+)\s*forint",
+            text
         )
 
-        if m95:
-            average95 = int(m95.group(1))
-
-        if md:
-            averageDiesel = int(md.group(1))
-
-        # -------------------------
-        # RADAR
-        # -------------------------
-
-        radarDay = detect_day(text)
-
-        radar95 = detect_change(
-            text,
-            ["benzin", "95"]
+        diesel = re.search(
+            r"(gázolaj|diesel)[^.]*?(nő|csökken)[^.]*?(\d+)\s*forint",
+            text
         )
 
-        radarDiesel = detect_change(
-            text,
-            ["gázolaj", "diesel"]
-        )
+        if benzin:
+            radar95 = f"+{benzin.group(2)} Ft"
 
-        radarTrend = detect_trend(text)
+        if diesel:
+            radarDiesel = f"+{diesel.group(3)} Ft"
 
     except Exception as e:
         print("SCRAPER ERROR:", e)
@@ -293,8 +177,7 @@ def get_fuel_info():
         "averageDiesel": averageDiesel,
         "radarDay": radarDay,
         "radar95": radar95,
-        "radarDiesel": radarDiesel,
-        "radarTrend": radarTrend
+        "radarDiesel": radarDiesel
     }
 
     fuel_cache["time"] = now
@@ -303,36 +186,23 @@ def get_fuel_info():
     return result
 
 
-# ==================================================
-# HOME
-# ==================================================
+# --------------------------------------------------
+# ROUTES
+# --------------------------------------------------
 
 @app.route("/")
 def home():
     return "UZEMANYAGARFIGYELO API ONLINE"
 
 
-# ==================================================
-# STATIONS
-# ==================================================
-
 @app.route("/stations")
 def stations():
-    lat = request.args.get(
-        "lat",
-        default=47.4979,
-        type=float
-    )
-
-    lon = request.args.get(
-        "lon",
-        default=19.0402,
-        type=float
-    )
+    lat = request.args.get("lat", default=47.4979, type=float)
+    lon = request.args.get("lon", default=19.0402, type=float)
 
     fuel = get_fuel_info()
 
-    geo_url = (
+    url = (
         "https://api.geoapify.com/v2/places"
         f"?categories=service.vehicle.fuel"
         f"&filter=circle:{lon},{lat},{SEARCH_RADIUS_M}"
@@ -340,39 +210,23 @@ def stations():
         f"&apiKey={API_KEY}"
     )
 
-    output = []
+    stations = []
 
     try:
-        r = requests.get(
-            geo_url,
-            timeout=REQUEST_TIMEOUT
-        )
-
+        r = requests.get(url, timeout=REQUEST_TIMEOUT)
         data = r.json()
 
-        for item in data.get(
-            "features",
-            []
-        ):
-            p = item.get(
-                "properties",
-                {}
-            )
+        for item in data.get("features", []):
+            p = item.get("properties", {})
 
-            s_lat = p.get("lat")
-            s_lon = p.get("lon")
+            station_lat = p.get("lat")
+            station_lon = p.get("lon")
 
-            if not s_lat or not s_lon:
+            if station_lat is None or station_lon is None:
                 continue
 
-            raw_name = p.get(
-                "name",
-                "Benzinkút"
-            )
-
-            brand = detect_brand(
-                raw_name
-            )
+            raw_name = p.get("name", "Benzinkút")
+            brand = detect_brand(raw_name)
 
             address = (
                 p.get("formatted")
@@ -381,102 +235,55 @@ def stations():
                 or "Ismeretlen cím"
             )
 
-            dist = haversine_km(
-                lat,
-                lon,
-                s_lat,
-                s_lon
+            distance_km = haversine_km(
+                lat, lon,
+                station_lat, station_lon
             )
 
-            output.append({
-                "name":
-                    f"{brand}, {address}",
-                "brand":
-                    brand,
-                "fuelType":
-                    "95 Benzin",
-                "price":
-                    estimate_station_price(
-                        fuel["average95"],
-                        brand
-                    ),
-                "lat":
-                    s_lat,
-                "lon":
-                    s_lon,
-                "distance":
-                    dist
+            stations.append({
+                "name": f"{brand}, {address}",
+                "brand": brand,
+                "fuelType": "95 Benzin",
+                "price": estimate_station_price(
+                    fuel["average95"],
+                    brand
+                ),
+                "lat": station_lat,
+                "lon": station_lon,
+                "distance": distance_km
             })
 
-        output.sort(
-            key=lambda x:
-            x["distance"]
-        )
+        stations.sort(key=lambda x: x["distance"])
 
         return jsonify({
             "status": "ok",
-
-            "average95":
-                fuel["average95"],
-
-            "averageDiesel":
-                fuel["averageDiesel"],
-
-            "radarDay":
-                fuel["radarDay"],
-
-            "radar95":
-                fuel["radar95"],
-
-            "radarDiesel":
-                fuel["radarDiesel"],
-
-            "radarTrend":
-                fuel["radarTrend"],
-
-            "stations":
-                output
+            "average95": fuel["average95"],
+            "averageDiesel": fuel["averageDiesel"],
+            "radarDay": fuel["radarDay"],
+            "radar95": fuel["radar95"],
+            "radarDiesel": fuel["radarDiesel"],
+            "stations": stations
         })
 
     except Exception as e:
-
         return jsonify({
             "status": "error",
             "message": str(e),
-
-            "average95":
-                fuel["average95"],
-
-            "averageDiesel":
-                fuel["averageDiesel"],
-
-            "radarDay":
-                fuel["radarDay"],
-
-            "radar95":
-                fuel["radar95"],
-
-            "radarDiesel":
-                fuel["radarDiesel"],
-
-            "radarTrend":
-                fuel["radarTrend"],
-
+            "average95": fuel["average95"],
+            "averageDiesel": fuel["averageDiesel"],
+            "radarDay": fuel["radarDay"],
+            "radar95": fuel["radar95"],
+            "radarDiesel": fuel["radarDiesel"],
             "stations": []
         })
 
 
-# ==================================================
+# --------------------------------------------------
 # MAIN
-# ==================================================
+# --------------------------------------------------
 
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
-        port=int(
-            os.environ.get(
-                "PORT",
-                5000
-            )
-        )
+        port=int(os.environ.get("PORT", 5000))
     )
