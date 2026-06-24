@@ -208,3 +208,7 @@ def stations():
         "radarDiesel": fuel["radarDiesel"],
         "stations": stations
     })
+
+@app.route("/fueltest")
+def fueltest():
+    return jsonify(get_fuel_info())
